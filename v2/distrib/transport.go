@@ -17,7 +17,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // TransportEncoder defines the interface for encoding/decoding distribution payloads.

@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto"
 	"github.com/miekg/dns"
 )
 

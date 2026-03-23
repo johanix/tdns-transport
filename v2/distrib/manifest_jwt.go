@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // DefaultJWTExpiration is the default JWT expiration duration (24 hours)

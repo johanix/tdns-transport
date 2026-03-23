@@ -3,7 +3,7 @@ package distrib
 import (
 	"testing"
 
-	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // mockBackend implements crypto.Backend for testing
