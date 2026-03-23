@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/distrib"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )

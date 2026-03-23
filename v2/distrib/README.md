@@ -86,7 +86,7 @@ Thresholds:
 ### Creating a JSON Manifest
 
 ```go
-import "github.com/johanix/tdns/v2/distrib"
+import "github.com/johanix/tdns-transport/v2/distrib"
 
 // Create metadata
 metadata := distrib.CreateManifestMetadata(
@@ -116,7 +116,7 @@ err = distrib.CalculateCHUNKHMAC(chunk, hmacKey)
 ### Creating a JWT Manifest
 
 ```go
-import "github.com/johanix/tdns/v2/distrib"
+import "github.com/johanix/tdns-transport/v2/distrib"
 
 claims := &distrib.JWTManifestClaims{
     Issuer:         "kdc",
