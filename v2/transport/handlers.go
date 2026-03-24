@@ -846,3 +846,28 @@ func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 		return nil
 	}
 }
+
+// RouteToCallback creates middleware that calls a callback function
+// for each successfully processed message. The callback receives
+// the parsed IncomingMessage and can dispatch to typed channels,
+// process inline, or route however the application needs.
+//
+// This replaces RouteToMsgHandler for applications that want
+// per-type fan-out instead of a single IncomingChan.
+//
+// The callback runs in the DNS server goroutine — it must be
+// non-blocking (e.g., push to a buffered channel and return).
+func RouteToCallback(fn func(*IncomingMessage)) MiddlewareFunc {
+	return func(ctx *MessageContext, next MessageHandlerFunc) error {
+		err := next(ctx)
+		if err != nil {
+			return err
+		}
+
+		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
+			fn(incomingMsg)
+		}
+
+		return nil
+	}
+}
