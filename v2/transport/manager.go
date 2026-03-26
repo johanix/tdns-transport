@@ -16,6 +16,9 @@ package transport
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -250,8 +253,13 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResp
 	if t == nil {
 		return nil, NewTransportError("", "ping", peer.ID, nil, false)
 	}
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate ping nonce: %w", err)
+	}
 	return t.Ping(ctx, peer, &PingRequest{
 		SenderID:  tm.LocalID,
+		Nonce:     hex.EncodeToString(nonce),
 		Timestamp: time.Now(),
 	})
 }
