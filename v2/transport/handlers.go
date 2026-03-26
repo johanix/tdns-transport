@@ -361,9 +361,8 @@ func HandleKeystate(ctx *MessageContext) error {
 		return fmt.Errorf("keystate message missing zone")
 	}
 	if keystate.Signal == "inventory" {
-		if len(keystate.KeyInventory) == 0 {
-			return fmt.Errorf("keystate inventory message has empty key inventory")
-		}
+		// Empty inventory is valid (signer has no keys for this zone).
+		// The recipient decides what to do with it.
 	} else if keystate.KeyTag == 0 {
 		return fmt.Errorf("keystate message missing key tag")
 	}
