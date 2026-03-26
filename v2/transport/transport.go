@@ -207,10 +207,11 @@ type PingRequest struct {
 
 // PingResponse is the response to a ping; echoes the nonce on success.
 type PingResponse struct {
-	ResponderID string    // Identity of the responder
-	Nonce       string    // Echoed nonce from request
-	OK          bool      // True if responder acknowledged
-	Timestamp   time.Time // Response timestamp
+	ResponderID string        // Identity of the responder
+	Nonce       string        // Echoed nonce from request
+	OK          bool          // True if responder acknowledged
+	Timestamp   time.Time     // Response timestamp
+	RTT         time.Duration // Round-trip time (measured by sender)
 }
 
 // KeyInventoryEntry describes a single DNSKEY in a KEYSTATE inventory message.

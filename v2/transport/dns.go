@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns-transport/v2/distrib"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -516,7 +516,9 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	}
 
 	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	sendTime := time.Now()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	rtt := time.Since(sendTime)
 	if err != nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
@@ -553,6 +555,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		Nonce:       confirm.Nonce,
 		OK:          confirm.Status == "ok",
 		Timestamp:   time.Unix(confirm.Timestamp, 0),
+		RTT:         rtt,
 	}, nil
 }
 
