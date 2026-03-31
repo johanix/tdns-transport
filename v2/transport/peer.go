@@ -104,14 +104,18 @@ type MessageStats struct {
 	LastUsed time.Time
 
 	// Per-message-type counters
-	HelloSent     uint64
-	HelloReceived uint64
-	BeatSent      uint64
-	BeatReceived  uint64
-	SyncSent      uint64
-	SyncReceived  uint64
-	PingSent      uint64
-	PingReceived  uint64
+	HelloSent       uint64
+	HelloReceived   uint64
+	BeatSent        uint64
+	BeatReceived    uint64
+	SyncSent        uint64
+	SyncReceived    uint64
+	PingSent        uint64
+	PingReceived    uint64
+	ConfirmSent     uint64
+	ConfirmReceived uint64
+	OtherSent       uint64
+	OtherReceived   uint64
 
 	// Total distribution count (sum of all message types)
 	TotalSent     uint64
@@ -165,6 +169,10 @@ func (ms *MessageStats) RecordMessageSent(msgType string) {
 		ms.SyncSent++
 	case "ping":
 		ms.PingSent++
+	case "confirm":
+		ms.ConfirmSent++
+	default:
+		ms.OtherSent++
 	}
 }
 
@@ -185,6 +193,10 @@ func (ms *MessageStats) RecordMessageReceived(msgType string) {
 		ms.SyncReceived++
 	case "ping":
 		ms.PingReceived++
+	case "confirm":
+		ms.ConfirmReceived++
+	default:
+		ms.OtherReceived++
 	}
 }
 
@@ -196,12 +208,45 @@ func (ms *MessageStats) GetStats() (lastUsed time.Time, sent, received uint64) {
 }
 
 // GetDetailedStats returns all per-message-type statistics.
-func (ms *MessageStats) GetDetailedStats() (lastUsed time.Time, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv uint64) {
+func (ms *MessageStats) GetDetailedStats() MessageStatsSnapshot {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
-	return ms.LastUsed, ms.HelloSent, ms.HelloReceived, ms.BeatSent, ms.BeatReceived,
-		ms.SyncSent, ms.SyncReceived, ms.PingSent, ms.PingReceived,
-		ms.TotalSent, ms.TotalReceived
+	return MessageStatsSnapshot{
+		LastUsed:        ms.LastUsed,
+		HelloSent:       ms.HelloSent,
+		HelloReceived:   ms.HelloReceived,
+		BeatSent:        ms.BeatSent,
+		BeatReceived:    ms.BeatReceived,
+		SyncSent:        ms.SyncSent,
+		SyncReceived:    ms.SyncReceived,
+		PingSent:        ms.PingSent,
+		PingReceived:    ms.PingReceived,
+		ConfirmSent:     ms.ConfirmSent,
+		ConfirmReceived: ms.ConfirmReceived,
+		OtherSent:       ms.OtherSent,
+		OtherReceived:   ms.OtherReceived,
+		TotalSent:       ms.TotalSent,
+		TotalReceived:   ms.TotalReceived,
+	}
+}
+
+// MessageStatsSnapshot is a point-in-time copy of MessageStats.
+type MessageStatsSnapshot struct {
+	LastUsed        time.Time
+	HelloSent       uint64
+	HelloReceived   uint64
+	BeatSent        uint64
+	BeatReceived    uint64
+	SyncSent        uint64
+	SyncReceived    uint64
+	PingSent        uint64
+	PingReceived    uint64
+	ConfirmSent     uint64
+	ConfirmReceived uint64
+	OtherSent       uint64
+	OtherReceived   uint64
+	TotalSent       uint64
+	TotalReceived   uint64
 }
 
 // GetState returns the peer's current state.

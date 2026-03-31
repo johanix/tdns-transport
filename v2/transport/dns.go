@@ -894,6 +894,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 
+	peer.Stats.RecordMessageSent("confirm")
 	return nil
 }
 
@@ -954,6 +955,7 @@ func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *c
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
 
+	peer.Stats.RecordMessageSent("status-update")
 	return nil
 }
 
@@ -1053,6 +1055,9 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		return nil, NewTransportError("DNS", opType, peer.ID,
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
+
+	// Record sent message statistics
+	peer.Stats.RecordMessageSent(opType)
 
 	if t.distributionMarkCompleted != nil {
 		t.distributionMarkCompleted(qname)
