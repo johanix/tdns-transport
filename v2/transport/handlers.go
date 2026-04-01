@@ -45,6 +45,7 @@ func HandleConfirmation(ctx *MessageContext) error {
 			AppliedRecords: confirm.AppliedRecords,
 			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
+			IgnoredRecords: confirm.IgnoredRecords,
 			Truncated:      confirm.Truncated,
 			Nonce:          confirm.Nonce,
 		})
@@ -52,10 +53,10 @@ func HandleConfirmation(ctx *MessageContext) error {
 
 	// Forward confirmation detail to SynchedDataEngine
 	type confirmCallback = func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool, nonce string)
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
 	if cb, ok := ctx.Data["on_confirmation_received"].(confirmCallback); ok && cb != nil && confirm.DistributionID != "" {
 		cb(confirm.DistributionID, confirm.SenderID, status,
-			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.Truncated, confirm.Nonce)
+			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.IgnoredRecords, confirm.Truncated, confirm.Nonce)
 	}
 
 	lgTransport().Debug("confirmation processed", "peer", ctx.PeerID, "status", confirm.Status)

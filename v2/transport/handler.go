@@ -41,6 +41,8 @@ func parseConfirmStatus(s string) ConfirmStatus {
 		return ConfirmRejected
 	case "PENDING":
 		return ConfirmPending
+	case "IGNORED":
+		return ConfirmIgnored
 	default:
 		return ConfirmFailed
 	}
