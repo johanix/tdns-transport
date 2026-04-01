@@ -64,29 +64,43 @@ func HandleConfirmation(ctx *MessageContext) error {
 
 // HandlePing processes ping messages and sends immediate response.
 func HandlePing(ctx *MessageContext) error {
-	lgTransport().Debug("processing ping", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+	lgTransport().Info("HandlePing: enter", "peer", ctx.PeerID, "distrib", ctx.DistributionID,
+		"payload_len", len(ctx.ChunkPayload), "chunk_crypted", ctx.ChunkCrypted, "sig_valid", ctx.SignatureValid)
+
+	// Log the raw payload for debugging (truncate if long)
+	payloadStr := string(ctx.ChunkPayload)
+	if len(payloadStr) > 500 {
+		payloadStr = payloadStr[:500] + "..."
+	}
+	lgTransport().Debug("HandlePing: raw payload", "payload", payloadStr)
 
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if ok {
+		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Type, "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
 		// Use pre-parsed message for type check
 		if incomingMsg.Type != "ping" {
 			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Type)
 		}
+	} else {
+		lgTransport().Debug("HandlePing: no pre-parsed incoming_message in context")
 	}
 
 	// Parse the ping message using DnsPingPayload (handles both standard and legacy field names)
 	var ping DnsPingPayload
 	if err := json.Unmarshal(ctx.ChunkPayload, &ping); err != nil {
-		return fmt.Errorf("failed to parse ping: %w", err)
+		return fmt.Errorf("failed to parse ping: %w (payload: %s)", err, payloadStr)
 	}
+
+	lgTransport().Debug("HandlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
+		"nonce", ping.Nonce, "sender", ping.SenderID, "myid", ping.MyIdentity)
 
 	if !ok && ping.Type != "ping" && ping.MessageType != "ping" {
 		return fmt.Errorf("invalid message type for ping handler: type=%s MessageType=%s", ping.Type, ping.MessageType)
 	}
 
 	if ping.Nonce == "" {
-		return fmt.Errorf("ping has empty nonce")
+		return fmt.Errorf("ping has empty nonce (payload: %s)", payloadStr)
 	}
 
 	// Get local identity from context (set by RouteViaRouter).
@@ -347,9 +361,8 @@ func HandleKeystate(ctx *MessageContext) error {
 		return fmt.Errorf("keystate message missing zone")
 	}
 	if keystate.Signal == "inventory" {
-		if len(keystate.KeyInventory) == 0 {
-			return fmt.Errorf("keystate inventory message has empty key inventory")
-		}
+		// Empty inventory is valid (signer has no keys for this zone).
+		// The recipient decides what to do with it.
 	} else if keystate.KeyTag == 0 {
 		return fmt.Errorf("keystate message missing key tag")
 	}
@@ -841,6 +854,31 @@ func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
 					return fmt.Errorf("message handler channel full")
 				}
 			}
+		}
+
+		return nil
+	}
+}
+
+// RouteToCallback creates middleware that calls a callback function
+// for each successfully processed message. The callback receives
+// the parsed IncomingMessage and can dispatch to typed channels,
+// process inline, or route however the application needs.
+//
+// This replaces RouteToMsgHandler for applications that want
+// per-type fan-out instead of a single IncomingChan.
+//
+// The callback runs in the DNS server goroutine — it must be
+// non-blocking (e.g., push to a buffered channel and return).
+func RouteToCallback(fn func(*IncomingMessage)) MiddlewareFunc {
+	return func(ctx *MessageContext, next MessageHandlerFunc) error {
+		err := next(ctx)
+		if err != nil {
+			return err
+		}
+
+		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
+			fn(incomingMsg)
 		}
 
 		return nil

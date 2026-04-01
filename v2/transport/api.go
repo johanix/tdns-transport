@@ -269,7 +269,9 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		Nonce:        req.Nonce,
 		Timestamp:    req.Timestamp.Unix(),
 	}
+	sendTime := time.Now()
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
+	rtt := time.Since(sendTime)
 	if err != nil {
 		return nil, NewTransportError("API", "Ping", peer.ID, err, true)
 	}
@@ -285,6 +287,7 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		Nonce:       apiResp.Nonce,
 		OK:          !apiResp.Error,
 		Timestamp:   time.Now(),
+		RTT:         rtt,
 	}, nil
 }
 

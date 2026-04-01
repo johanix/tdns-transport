@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns-transport/v2/distrib"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -516,7 +516,9 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	}
 
 	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	sendTime := time.Now()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	rtt := time.Since(sendTime)
 	if err != nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
@@ -553,6 +555,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		Nonce:       confirm.Nonce,
 		OK:          confirm.Status == "ok",
 		Timestamp:   time.Unix(confirm.Timestamp, 0),
+		RTT:         rtt,
 	}, nil
 }
 
@@ -891,6 +894,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 
+	peer.Stats.RecordMessageSent("confirm")
 	return nil
 }
 
@@ -951,6 +955,7 @@ func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *c
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
 
+	peer.Stats.RecordMessageSent("status-update")
 	return nil
 }
 
@@ -1050,6 +1055,9 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		return nil, NewTransportError("DNS", opType, peer.ID,
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
+
+	// Record sent message statistics
+	peer.Stats.RecordMessageSent(opType)
 
 	if t.distributionMarkCompleted != nil {
 		t.distributionMarkCompleted(qname)
