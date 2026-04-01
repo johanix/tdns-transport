@@ -72,18 +72,18 @@ func HandlePing(ctx *MessageContext) error {
 	if len(payloadStr) > 500 {
 		payloadStr = payloadStr[:500] + "..."
 	}
-	lgTransport().Info("HandlePing: raw payload", "payload", payloadStr)
+	lgTransport().Debug("HandlePing: raw payload", "payload", payloadStr)
 
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
 	if ok {
-		lgTransport().Info("HandlePing: pre-parsed message", "type", incomingMsg.Type, "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
+		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Type, "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
 		// Use pre-parsed message for type check
 		if incomingMsg.Type != "ping" {
 			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Type)
 		}
 	} else {
-		lgTransport().Info("HandlePing: no pre-parsed incoming_message in context")
+		lgTransport().Debug("HandlePing: no pre-parsed incoming_message in context")
 	}
 
 	// Parse the ping message using DnsPingPayload (handles both standard and legacy field names)
@@ -92,7 +92,7 @@ func HandlePing(ctx *MessageContext) error {
 		return fmt.Errorf("failed to parse ping: %w (payload: %s)", err, payloadStr)
 	}
 
-	lgTransport().Info("HandlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
+	lgTransport().Debug("HandlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
 		"nonce", ping.Nonce, "sender", ping.SenderID, "myid", ping.MyIdentity)
 
 	if !ok && ping.Type != "ping" && ping.MessageType != "ping" {

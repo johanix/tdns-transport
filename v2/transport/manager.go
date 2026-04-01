@@ -228,7 +228,7 @@ func (tm *TransportManager) StartReliableQueue(ctx context.Context,
 // Enqueue adds a message to the reliable delivery queue.
 // Returns the distribution ID for confirmation tracking.
 func (tm *TransportManager) Enqueue(msg *OutgoingMessage) (string, error) {
-	return "", tm.ReliableQueue.Enqueue(msg)
+	return msg.DistributionID, tm.ReliableQueue.Enqueue(msg)
 }
 
 // MarkDeliveryConfirmed marks a queued message as confirmed.
@@ -251,7 +251,7 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResponse, error) {
 	t := tm.SelectTransport(peer)
 	if t == nil {
-		return nil, NewTransportError("", "ping", peer.ID, nil, false)
+		return nil, NewTransportError("", "ping", peer.ID, fmt.Errorf("no transport available for peer %s", peer.ID), false)
 	}
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {

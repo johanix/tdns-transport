@@ -264,12 +264,12 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 }
 
 // MarkConfirmed marks a message as successfully delivered and removes it from the queue.
-// senderID is the identity of the confirming party (= the original message recipient).
-func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, senderID string) bool {
+// recipientID is the identity of the original message recipient (who is confirming delivery).
+func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, recipientID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	key := pendingKey(distributionID, senderID)
+	key := pendingKey(distributionID, recipientID)
 	pending, exists := q.pending[key]
 	if !exists {
 		// Not in queue - may have already been confirmed or expired
@@ -509,6 +509,8 @@ func withDefaultInt(val, def int) int {
 // Used for replay protection in sync/confirm messages.
 func generateNonce() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }
