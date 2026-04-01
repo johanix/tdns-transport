@@ -71,7 +71,7 @@ type ChunkNotifyHandler struct {
 	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue
 	// and to forward per-RR detail to the SynchedDataEngine.
 	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool, nonce string)
+		zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
 
 	// GossipForPeer returns serialized gossip data for a given peer.
 	// Used by HandleBeat to include gossip in beat responses.
