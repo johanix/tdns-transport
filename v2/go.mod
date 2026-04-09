@@ -9,7 +9,7 @@ replace (
 
 require (
 	github.com/cloudflare/circl v1.6.3
-	github.com/go-jose/go-jose/v4 v4.0.5
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.70
