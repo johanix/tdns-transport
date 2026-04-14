@@ -102,6 +102,7 @@ type IncomingConfirmation struct {
 	AppliedRecords []string
 	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
+	IgnoredRecords []string
 	Truncated      bool
 	Nonce          string // Echoed nonce from the original sync request
 }
@@ -846,6 +847,8 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		AppliedRecords: req.AppliedRecords,
 		RemovedRecords: req.RemovedRecords,
 		RejectedItems:  req.RejectedItems,
+		IgnoredCount:   len(req.IgnoredRecords),
+		IgnoredRecords: req.IgnoredRecords,
 		Truncated:      req.Truncated,
 		Timestamp:      req.Timestamp.Unix(),
 	}
@@ -1319,6 +1322,8 @@ type DnsConfirmPayload struct {
 	AppliedRecords []string          `json:"applied_records,omitempty"`
 	RemovedRecords []string          `json:"removed_records,omitempty"`
 	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
+	IgnoredCount   int               `json:"ignored_count,omitempty"`
+	IgnoredRecords []string          `json:"ignored_records,omitempty"`
 	Truncated      bool              `json:"truncated,omitempty"`
 	Timestamp      int64             `json:"timestamp"`
 }

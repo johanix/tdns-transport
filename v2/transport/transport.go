@@ -53,6 +53,7 @@ const (
 	ConfirmFailed                            // Operation failed
 	ConfirmRejected                          // Rejected (invalid, expired)
 	ConfirmPending                           // Received, processing in progress
+	ConfirmIgnored                           // Persisted but not applied (role-based filter)
 )
 
 func (c ConfirmStatus) String() string {
@@ -67,6 +68,8 @@ func (c ConfirmStatus) String() string {
 		return "REJECTED"
 	case ConfirmPending:
 		return "PENDING"
+	case ConfirmIgnored:
+		return "IGNORED"
 	default:
 		return "UNKNOWN"
 	}
@@ -318,6 +321,7 @@ type ConfirmRequest struct {
 	AppliedRecords []string          // RRs accepted (additions)
 	RemovedRecords []string          // RRs confirmed removed (deletions)
 	RejectedItems  []RejectedItemDTO // RRs rejected with reasons
+	IgnoredRecords []string          // RRs persisted but not applied (role-based filter)
 	Truncated      bool              // True if applied/removed_records was dropped for size
 	Timestamp      time.Time         // Confirmation timestamp
 	Signature      []byte            // Optional signature
