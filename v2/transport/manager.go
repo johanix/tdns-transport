@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -296,6 +297,18 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 		resp, err := dispatch(primary)
 		if err == nil {
 			return resp, nil
+		}
+		// Don't fall back on non-retryable errors. The same problem
+		// (e.g. missing crypto key, no address, marshal failure) will
+		// hit the alternate transport identically — falling back just
+		// turns a clear error into a confusing one. Errors not wrapped
+		// in *TransportError are treated as fall-back-eligible (safe
+		// default for unaudited code paths).
+		var te *TransportError
+		if errors.As(err, &te) && !te.Retryable {
+			slog.Debug("primary transport failed with non-retryable error, not falling back",
+				"transport", primary.Name(), "peer", peer.ID, "err", err)
+			return nil, err
 		}
 		slog.Debug("primary transport failed, trying fallback",
 			"transport", primary.Name(), "peer", peer.ID, "err", err)
