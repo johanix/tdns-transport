@@ -87,6 +87,18 @@ type TransportManager struct {
 	LocalID     string
 	ControlZone string
 
+	// OnPeerDiscovered is invoked by the application's discovery loop
+	// (or, in a future phase, by transport itself) when peer discovery
+	// completes successfully. The application registers a function here
+	// at startup; transport never sets it. Optional — if nil, callers
+	// must skip the invocation.
+	//
+	// This is the seam through which the per-application discovery
+	// completion logic (sync state, set preferred mechanism, transition
+	// peer to KNOWN) is dispatched. See Bite 8 in
+	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+	OnPeerDiscovered func(peerID string)
+
 	// Which mechanisms are active
 	supportedMechanisms []string
 }
