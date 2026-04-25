@@ -249,6 +249,72 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 	return tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
 }
 
+// Send delivers a message to a peer using the primary transport
+// chosen by SelectTransport, falling back to the alternative on
+// error. The message type is determined by the concrete type of req:
+//
+//   - *SyncRequest    → Transport.Sync
+//   - *PingRequest    → Transport.Ping
+//   - *RelocateRequest → Transport.Relocate
+//
+// (Hello and Beat are deliberately NOT supported by this generic
+// path. In the current codebase those operations send on all
+// available transports in parallel rather than primary-then-
+// fallback, with substantial application-side bookkeeping mixed
+// in. Wrapping them under a generic Send would change semantics.
+// Phase 5 of the main refactor will address that separately.)
+//
+// Returns the response (one of *SyncResponse, *PingResponse,
+// *RelocateResponse) or an error if both transports failed or the
+// message type is unsupported.
+//
+// Bite 3 of the transport refactor early-bites plan; see
+// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{}) (interface{}, error) {
+	if peer == nil {
+		return nil, fmt.Errorf("Send: peer is nil")
+	}
+	primary := tm.SelectTransport(peer)
+
+	dispatch := func(t Transport) (interface{}, error) {
+		if t == nil {
+			return nil, fmt.Errorf("no transport selected")
+		}
+		switch r := req.(type) {
+		case *SyncRequest:
+			return t.Sync(ctx, peer, r)
+		case *PingRequest:
+			return t.Ping(ctx, peer, r)
+		case *RelocateRequest:
+			return t.Relocate(ctx, peer, r)
+		default:
+			return nil, fmt.Errorf("Send: unsupported message type %T (use Hello/Beat directly for parallel-send semantics)", req)
+		}
+	}
+
+	if primary != nil {
+		resp, err := dispatch(primary)
+		if err == nil {
+			return resp, nil
+		}
+		slog.Debug("primary transport failed, trying fallback",
+			"transport", primary.Name(), "peer", peer.ID, "err", err)
+	}
+
+	// Pick the fallback (the one that isn't the primary).
+	var fallback Transport
+	if primary == tm.APITransport && tm.DNSTransport != nil {
+		fallback = tm.DNSTransport
+	} else if primary == tm.DNSTransport && tm.APITransport != nil {
+		fallback = tm.APITransport
+	}
+	if fallback != nil {
+		return dispatch(fallback)
+	}
+
+	return nil, fmt.Errorf("Send: all transports failed for peer %s", peer.ID)
+}
+
 // GetQueueStats returns RMQ statistics.
 func (tm *TransportManager) GetQueueStats() QueueStats {
 	return tm.ReliableQueue.GetStats()
