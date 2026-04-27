@@ -262,6 +262,43 @@ func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
 	m.StateChanged = time.Now()
 }
 
+// SetMechanismLastHelloRecv records the time a Hello was last received
+// on the named mechanism. Creates the MechanismState entry on first
+// call. Acquires p.mu for the duration of the write, so this is the
+// safe replacement for direct map indexing of p.Mechanisms[name].
+func (p *Peer) SetMechanismLastHelloRecv(name string, t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.LastHelloRecv = t
+}
+
+// SetMechanismLastBeatRecv records the time a Beat (or Ping treated as
+// liveness) was last received on the named mechanism. Same locking
+// contract as SetMechanismLastHelloRecv.
+func (p *Peer) SetMechanismLastBeatRecv(name string, t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.LastBeatRecv = t
+}
+
 // AgentMechanismSnapshot is a point-in-time view of one mechanism's
 // state on an Agent (in tdns-mp terms). PopulateFromAgent uses
 // instances of this struct to fill MechanismState entries on a Peer.
