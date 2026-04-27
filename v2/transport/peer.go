@@ -80,7 +80,9 @@ type Peer struct {
 	// Shared zones
 	SharedZones map[string]*ZoneRelation // Zones we share with this peer
 
-	// Communication state
+	// Communication state (single-state legacy fields, kept in sync with
+	// Mechanisms via dual-write — see Bite 1 in
+	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md).
 	LastHelloSent     time.Time // When we last sent a hello
 	LastHelloReceived time.Time // When we last received a hello
 	LastBeatSent      time.Time // When we last sent a beat
@@ -93,6 +95,33 @@ type Peer struct {
 
 	// Preferred transport
 	PreferredTransport string // "API" or "DNS"
+
+	// Per-mechanism state (Bite 1, additive). Keys: "API", "DNS".
+	// Populated in parallel with the legacy single-state fields above
+	// during the dual-write window. The legacy fields remain canonical
+	// until Phase 1 of the main refactor deletes them.
+	Mechanisms map[string]*MechanismState
+}
+
+// MechanismState tracks per-mechanism (e.g. "API", "DNS") state for a
+// peer. Mirrors the per-mechanism shape the Agent struct in tdns-mp
+// already has via ApiDetails/DnsDetails, so the eventual collapse to
+// a single Peer-as-canonical model is straightforward.
+//
+// Added by Bite 1 of the transport refactor early-bites plan; see
+// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+type MechanismState struct {
+	State            PeerState
+	StateReason      string
+	StateChanged     time.Time
+	Address          *Address
+	LastHelloSent    time.Time
+	LastHelloRecv    time.Time
+	LastBeatSent     time.Time
+	LastBeatRecv     time.Time
+	BeatSequence     uint64
+	ConsecutiveFails int
+	Stats            MessageStats
 }
 
 // MessageStats tracks detailed statistics for messages exchanged with a peer.
@@ -139,6 +168,200 @@ func NewPeer(id string) *Peer {
 		State:        PeerStateNeeded,
 		StateChanged: time.Now(),
 		SharedZones:  make(map[string]*ZoneRelation),
+		Mechanisms: map[string]*MechanismState{
+			"API": {State: PeerStateNeeded, StateChanged: time.Now()},
+			"DNS": {State: PeerStateNeeded, StateChanged: time.Now()},
+		},
+	}
+}
+
+// HasMechanism reports whether the peer has the given mechanism
+// (e.g. "API", "DNS") available — i.e. the per-mechanism address or
+// endpoint is populated. The Mechanisms map being non-nil is necessary
+// but not sufficient; the caller cares about reachability.
+func (p *Peer) HasMechanism(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Mechanisms == nil {
+		return false
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		return false
+	}
+	switch name {
+	case "DNS":
+		return m.Address != nil
+	case "API":
+		return p.APIEndpoint != ""
+	default:
+		return false
+	}
+}
+
+// PreferredMechanism returns the preferred mechanism name ("API" or
+// "DNS") based on availability. API is preferred when both are
+// available. Returns "" if neither is available.
+func (p *Peer) PreferredMechanism() string {
+	if p.HasMechanism("API") {
+		return "API"
+	}
+	if p.HasMechanism("DNS") {
+		return "DNS"
+	}
+	return ""
+}
+
+// EffectiveState returns the best state across all mechanisms, mirror
+// of Agent.EffectiveState() in tdns-mp. Falls back to the legacy
+// Peer.State if no mechanism has reached an active state.
+func (p *Peer) EffectiveState() PeerState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	best := PeerState(0)
+	bestSet := false
+	for _, name := range []string{"API", "DNS"} {
+		m, ok := p.Mechanisms[name]
+		if !ok || m == nil {
+			continue
+		}
+		switch m.State {
+		case PeerStateOperational, PeerStateDegraded, PeerStateInterrupted:
+			if !bestSet || m.State < best {
+				best = m.State
+				bestSet = true
+			}
+		}
+	}
+	if bestSet {
+		return best
+	}
+	return p.State
+}
+
+// SetMechanismState updates the per-mechanism state. Creates the
+// MechanismState entry on first call for an unknown mechanism. The
+// peer-level State field is not touched here; callers that want both
+// updated should call SetState as well (the dual-write contract
+// during Bite 1).
+func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.State = state
+	m.StateReason = reason
+	m.StateChanged = time.Now()
+}
+
+// AgentMechanismSnapshot is a point-in-time view of one mechanism's
+// state on an Agent (in tdns-mp terms). PopulateFromAgent uses
+// instances of this struct to fill MechanismState entries on a Peer.
+//
+// The struct decouples transport from the MP Agent type — transport
+// never imports or references *Agent directly; instead it consumes
+// snapshots produced by AgentLike implementations.
+//
+// Added by Bite 7 of the transport refactor early-bites plan; see
+// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
+type AgentMechanismSnapshot struct {
+	State            PeerState
+	StateReason      string
+	Address          *Address
+	LastHelloSent    time.Time
+	LastHelloRecv    time.Time
+	LastBeatSent     time.Time
+	LastBeatRecv     time.Time
+	BeatSequence     uint64
+	ConsecutiveFails int
+}
+
+// AgentLike is satisfied by tdns-mp's *Agent. It exposes the
+// per-mechanism state needed to populate a Peer. Defined as an
+// interface so transport stays decoupled from MP.
+type AgentLike interface {
+	APIMechanismState() AgentMechanismSnapshot
+	DNSMechanismState() AgentMechanismSnapshot
+}
+
+// PopulateFromAgent fills p.Mechanisms["API"] and p.Mechanisms["DNS"]
+// from an AgentLike. The mechanism map is created if absent.
+//
+// State, address, and timestamps are mirrored field-by-field from the
+// snapshots. This is the canonical Peer-from-Agent path that
+// SyncPeerFromAgent in tdns-mp delegates to during the dual-write
+// window. Once Phase 7 of the main refactor deletes the duplicated
+// Agent state, PopulateFromAgent (or its successor) becomes the
+// single source of truth for the Peer's per-mechanism view.
+//
+// Note: peer.APIEndpoint is the canonical reachability marker for the
+// API mechanism (a string URL); MechanismState.Address is the
+// reachability marker for DNS (a host/port pair). PopulateFromAgent
+// writes both — the caller must ensure peer.APIEndpoint is set
+// alongside if the agent's API endpoint is known.
+func (p *Peer) PopulateFromAgent(a AgentLike) {
+	if a == nil {
+		return
+	}
+	apiSnap := a.APIMechanismState()
+	dnsSnap := a.DNSMechanismState()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+
+	for _, e := range []struct {
+		name string
+		snap AgentMechanismSnapshot
+	}{
+		{"API", apiSnap},
+		{"DNS", dnsSnap},
+	} {
+		m, ok := p.Mechanisms[e.name]
+		if !ok || m == nil {
+			m = &MechanismState{}
+			p.Mechanisms[e.name] = m
+		}
+		// Skip state regression: only update StateChanged if state
+		// actually changed (preserves the timestamp of the last real
+		// transition).
+		if m.State != e.snap.State {
+			m.State = e.snap.State
+			m.StateReason = e.snap.StateReason
+			m.StateChanged = time.Now()
+		}
+		if e.snap.Address != nil {
+			m.Address = e.snap.Address
+		}
+		if !e.snap.LastHelloSent.IsZero() {
+			m.LastHelloSent = e.snap.LastHelloSent
+		}
+		if !e.snap.LastHelloRecv.IsZero() {
+			m.LastHelloRecv = e.snap.LastHelloRecv
+		}
+		if !e.snap.LastBeatSent.IsZero() {
+			m.LastBeatSent = e.snap.LastBeatSent
+		}
+		if !e.snap.LastBeatRecv.IsZero() {
+			m.LastBeatRecv = e.snap.LastBeatRecv
+		}
+		if e.snap.BeatSequence > m.BeatSequence {
+			m.BeatSequence = e.snap.BeatSequence
+		}
+		// ConsecutiveFails: take the snapshot value verbatim (not max),
+		// because a successful contact must be able to clear it.
+		m.ConsecutiveFails = e.snap.ConsecutiveFails
 	}
 }
 

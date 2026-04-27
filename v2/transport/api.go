@@ -72,14 +72,16 @@ func (t *APITransport) Name() string {
 // Uses peer.APIEndpoint (the discovered base URI) when available,
 // falling back to constructing from CurrentAddress().
 func apiURL(peer *Peer, path string) (string, error) {
-	if peer.APIEndpoint != "" {
-		return peer.APIEndpoint + path, nil
+	if peer.APIEndpoint == "" {
+		// API transport requires an explicit HTTPS endpoint. Falling
+		// back to peer.CurrentAddress() (a DNS endpoint for DNS-only
+		// peers) would produce structurally invalid HTTP URLs like
+		// "udp://host:53/sync" — guaranteed to fail with
+		// "unsupported protocol scheme udp". Refusing here gives
+		// callers a clear error instead.
+		return "", fmt.Errorf("peer %s has no API endpoint configured", peer.ID)
 	}
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return "", fmt.Errorf("no address available")
-	}
-	return buildURL(addr, path), nil
+	return peer.APIEndpoint + path, nil
 }
 
 // Hello sends a hello handshake request to a peer via HTTPS API.
@@ -350,15 +352,6 @@ func (t *APITransport) doRequest(ctx context.Context, method, url string, body i
 	}
 
 	return respBody, nil
-}
-
-// buildURL constructs a full URL from an address and path.
-func buildURL(addr *Address, path string) string {
-	scheme := addr.Transport
-	if scheme == "" {
-		scheme = "https"
-	}
-	return fmt.Sprintf("%s://%s:%d%s", scheme, addr.Host, addr.Port, path)
 }
 
 // API request/response types for JSON serialization.
