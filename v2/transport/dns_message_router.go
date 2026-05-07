@@ -125,7 +125,8 @@ type RouterMetrics struct {
 // NewDNSMessageRouter creates a new router instance.
 func NewDNSMessageRouter() *DNSMessageRouter {
 	return &DNSMessageRouter{
-		handlers: make(map[MessageType][]*HandlerRegistration),
+		handlers:   make(map[MessageType][]*HandlerRegistration),
+		middleware: []MiddlewareFunc{},
 		metrics: RouterMetrics{
 			UnhandledTypes: make(map[MessageType]uint64),
 		},
