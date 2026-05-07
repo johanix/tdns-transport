@@ -94,11 +94,16 @@ type TransportManager struct {
 	// at startup; transport never sets it. Optional — if nil, callers
 	// must skip the invocation.
 	//
+	// The invocation site is responsible for resolving the peer from
+	// PeerRegistry before calling; the callback receives a non-nil
+	// *Peer and never has to repeat the lookup itself.
+	//
 	// This is the seam through which the per-application discovery
 	// completion logic (sync state, set preferred mechanism, transition
 	// peer to KNOWN) is dispatched. See Bite 8 in
-	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
-	OnPeerDiscovered func(peerID string)
+	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md and
+	// Bite E in tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+	OnPeerDiscovered func(peer *Peer)
 
 	// Which mechanisms are active
 	supportedMechanisms []string
