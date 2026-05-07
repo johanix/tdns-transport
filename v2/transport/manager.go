@@ -105,6 +105,28 @@ type TransportManager struct {
 	// Bite E in tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 	OnPeerDiscovered func(peer *Peer)
 
+	// OnDiscoveryFailed is invoked when a peer-discovery attempt
+	// fails. The application's discovery loop is responsible for
+	// retries — this callback fires once per failed attempt round,
+	// not once forever; the same peer may produce multiple
+	// invocations across the lifetime of the loop.
+	//
+	// Optional. If nil, transport takes no action beyond what the
+	// invocation site already does on failure (e.g. logging).
+	//
+	// Symmetric with OnPeerDiscovered: invocation site resolves the
+	// peer (using GetOrCreate when discovery fails before a peer
+	// has materialised) and passes a non-nil *Peer plus the error
+	// that ended this round.
+	//
+	// Currently invoked by MP's discovery loop in attemptDiscovery
+	// when a discovery round returns no useful endpoints or
+	// registration fails; will be invoked by transport itself once
+	// discovery moves into transport (Phase 6 part 2 of the
+	// transport interface redesign). See Bite D in
+	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+	OnDiscoveryFailed func(peer *Peer, err error)
+
 	// Which mechanisms are active
 	supportedMechanisms []string
 }
