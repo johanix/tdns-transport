@@ -127,8 +127,35 @@ type TransportManager struct {
 	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 	OnDiscoveryFailed func(peer *Peer, err error)
 
+	// DiscoveryDriver is a TEMPORARY seam that lets the explicit
+	// DiscoverPeer method on TransportManager delegate to the
+	// application's existing discovery code. Phase 6 part 2 of the
+	// transport interface redesign moves the discovery loop into
+	// transport and deletes this interface.
+	//
+	// Optional. If nil, DiscoverPeer can still return peers that
+	// are already KNOWN, but cannot trigger fresh discovery.
+	//
+	// See Bite F in
+	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+	DiscoveryDriver DiscoveryDriver
+
 	// Which mechanisms are active
 	supportedMechanisms []string
+}
+
+// DiscoveryDriver is a TEMPORARY interface (Bite F): the application
+// supplies a synchronous discovery primitive that
+// TransportManager.DiscoverPeer can call when a peer needs fresh
+// discovery. Deleted by Phase 6 part 2 of the transport interface
+// redesign, when discovery moves into the transport package.
+type DiscoveryDriver interface {
+	// RunDiscovery performs one synchronous discovery attempt for
+	// the peer's identity (`peer.ID`). On success the peer is
+	// expected to be in PeerStateKnown (or higher) when the call
+	// returns. On failure returns an error and leaves the peer in
+	// whatever state the application's discovery code chose.
+	RunDiscovery(ctx context.Context, peer *Peer) error
 }
 
 // NewTransportManager creates and wires all transport components.
@@ -363,6 +390,45 @@ func (tm *TransportManager) GetQueueStats() QueueStats {
 // GetQueuePendingMessages returns a snapshot of pending messages.
 func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 	return tm.ReliableQueue.GetPendingMessages()
+}
+
+// DiscoverPeer initiates peer discovery for the given identity and
+// blocks until discovery completes, the context is cancelled, or
+// discovery fails. Returns the resolved Peer on success.
+//
+// If a peer with this identity is already in PeerStateKnown (or
+// higher), DiscoverPeer returns it immediately without re-discovery.
+// Otherwise it delegates to tm.DiscoveryDriver — currently a
+// TEMPORARY seam back into the application's existing discovery
+// loop. When tm.DiscoveryDriver is nil, DiscoverPeer can only
+// return already-known peers; an unknown identity yields an error.
+//
+// The asynchronous discovery path (the application's polling loop
+// that watches for NEEDED peers) is unaffected by this method.
+// Callers wanting fire-and-forget behaviour can launch their own
+// goroutine — DiscoverPeer is intentionally synchronous so that
+// CLI commands, tests, and other inline callers can use the result
+// immediately.
+//
+// Phase 6 part 2 of the transport interface redesign moves
+// discovery into transport and removes the DiscoveryDriver
+// indirection. See Bite F in
+// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (*Peer, error) {
+	if identity == "" {
+		return nil, fmt.Errorf("DiscoverPeer: empty identity")
+	}
+	peer := tm.PeerRegistry.GetOrCreate(identity)
+	if peer.EffectiveState() >= PeerStateKnown {
+		return peer, nil
+	}
+	if tm.DiscoveryDriver == nil {
+		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no DiscoveryDriver configured", identity)
+	}
+	if err := tm.DiscoveryDriver.RunDiscovery(ctx, peer); err != nil {
+		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
+	}
+	return peer, nil
 }
 
 // SendPing sends a ping to a peer using the best available transport.
