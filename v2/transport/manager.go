@@ -431,21 +431,31 @@ func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (
 	return peer, nil
 }
 
-// SendPing sends a ping to a peer using the best available transport.
+// SendPing sends a ping to a peer using the best available
+// transport, falling back to the alternate transport if the primary
+// fails with a retryable error. Bite G: delegates to tm.Send so that
+// ping inherits the primary-then-fallback behaviour from the generic
+// path; Hello and Beat are NOT migrated to tm.Send because their
+// wrappers send on all transports in parallel rather than
+// primary-then-fallback (Phase 5 of the main refactor).
 func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResponse, error) {
-	t := tm.SelectTransport(peer)
-	if t == nil {
-		return nil, NewTransportError("", "ping", peer.ID, fmt.Errorf("no transport available for peer %s", peer.ID), false)
-	}
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("failed to generate ping nonce: %w", err)
 	}
-	return t.Ping(ctx, peer, &PingRequest{
+	resp, err := tm.Send(ctx, peer, &PingRequest{
 		SenderID:  tm.LocalID,
 		Nonce:     hex.EncodeToString(nonce),
 		Timestamp: time.Now(),
 	})
+	if err != nil {
+		return nil, err
+	}
+	pingResp, ok := resp.(*PingResponse)
+	if !ok {
+		return nil, fmt.Errorf("SendPing: unexpected response type %T", resp)
+	}
+	return pingResp, nil
 }
 
 // IsTransportSupported checks if a transport mechanism is enabled.
