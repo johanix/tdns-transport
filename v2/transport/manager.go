@@ -428,6 +428,10 @@ func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (
 	if err := tm.DiscoveryDriver.RunDiscovery(ctx, peer); err != nil {
 		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
 	}
+	if peer.EffectiveState() < PeerStateKnown {
+		return nil, fmt.Errorf("DiscoverPeer: driver returned nil but peer %q state is %v, expected >= Known",
+			identity, peer.EffectiveState())
+	}
 	return peer, nil
 }
 
