@@ -554,6 +554,19 @@ func (p *Peer) AddSharedZone(zone, ourRole, peerRole string) {
 	}
 }
 
+// ReplaceSharedZones atomically replaces the peer's shared-zone set under the
+// peer lock. Callers must not hold a registry/peer-metadata mutex across this
+// call (lock order: registry -> peer-metadata -> transport.Peer).
+func (p *Peer) ReplaceSharedZones(zones []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.SharedZones = make(map[string]*ZoneRelation, len(zones))
+	for _, zone := range zones {
+		p.SharedZones[zone] = &ZoneRelation{Zone: zone}
+	}
+}
+
 // GetSharedZone returns the zone relation for a specific zone.
 func (p *Peer) GetSharedZone(zone string) *ZoneRelation {
 	p.mu.RLock()
