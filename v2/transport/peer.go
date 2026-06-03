@@ -122,6 +122,10 @@ type MechanismState struct {
 	BeatSequence     uint64
 	ConsecutiveFails int
 	Stats            MessageStats
+	// ContactInfo is the discovery status for this mechanism, set when the
+	// mechanism's endpoint is discovered (e.g. "complete"). Empty for peers
+	// that were never discovered (config-only infra peers).
+	ContactInfo string
 }
 
 // MessageStats tracks detailed statistics for messages exchanged with a peer.
@@ -297,6 +301,39 @@ func (p *Peer) SetMechanismLastBeatRecv(name string, t time.Time) {
 		p.Mechanisms[name] = m
 	}
 	m.LastBeatRecv = t
+}
+
+// SetMechanismContactInfo sets the discovery contact-info status for a
+// mechanism (e.g. "complete" once the mechanism's endpoint was discovered).
+// Creates the MechanismState entry on first call. Same locking contract as
+// SetMechanismState.
+func (p *Peer) SetMechanismContactInfo(name, status string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.ContactInfo = status
+}
+
+// MechanismContactInfo returns the discovery contact-info status for the named
+// mechanism, or "" if the mechanism is unknown or was never discovered.
+func (p *Peer) MechanismContactInfo(name string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Mechanisms == nil {
+		return ""
+	}
+	if m, ok := p.Mechanisms[name]; ok && m != nil {
+		return m.ContactInfo
+	}
+	return ""
 }
 
 // AgentMechanismSnapshot is a point-in-time view of one mechanism's
