@@ -96,6 +96,11 @@ type Peer struct {
 	// Preferred transport
 	PreferredTransport string // "API" or "DNS"
 
+	// LivenessInterval is OUR local beat interval (seconds): how often we
+	// beat this peer. Used by EffectiveState()'s age-based decay to judge
+	// how many of our own beats a peer has missed. 0 ⇒ default (30s).
+	LivenessInterval uint32
+
 	// Per-mechanism state (Bite 1, additive). Keys: "API", "DNS".
 	// Populated in parallel with the legacy single-state fields above
 	// during the dual-write window. The legacy fields remain canonical
@@ -219,6 +224,14 @@ func (p *Peer) PreferredMechanism() string {
 // EffectiveState returns the best state across all mechanisms, mirror
 // of Agent.EffectiveState() in tdns-mp. Falls back to the legacy
 // Peer.State if no mechanism has reached an active state.
+//
+// Liveness decay is applied on read: an active mechanism whose last
+// successful beat round-trip is too old (per our LivenessInterval and
+// the peer's advertised BeatInterval) reads as DEGRADED or INTERRUPTED,
+// even though the stored State is still OPERATIONAL. This co-locates
+// "I can reach this peer" with the beat data that proves it — promotion
+// is stamped on a successful outbound beat, demotion falls out of the
+// aging of that same timestamp. No external decay loop is needed.
 func (p *Peer) EffectiveState() PeerState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -230,10 +243,11 @@ func (p *Peer) EffectiveState() PeerState {
 		if !ok || m == nil {
 			continue
 		}
-		switch m.State {
+		st := p.decayedMechanismState(m)
+		switch st {
 		case PeerStateOperational, PeerStateDegraded, PeerStateInterrupted:
-			if !bestSet || m.State < best {
-				best = m.State
+			if !bestSet || st < best {
+				best = st
 				bestSet = true
 			}
 		}
@@ -242,6 +256,52 @@ func (p *Peer) EffectiveState() PeerState {
 		return best
 	}
 	return p.State
+}
+
+// decayedMechanismState returns m.State after applying age-based liveness
+// decay. Only active states (OPERATIONAL/DEGRADED/INTERRUPTED) decay; a
+// mechanism not yet operational is returned unchanged. Mirrors the NG
+// checkPeerState thresholds (2× ⇒ DEGRADED, 10× ⇒ INTERRUPTED) so the
+// transport-owned read agrees with the NG store during the transition.
+// Caller holds p.mu.
+func (p *Peer) decayedMechanismState(m *MechanismState) PeerState {
+	switch m.State {
+	case PeerStateOperational, PeerStateDegraded, PeerStateInterrupted:
+		// fall through to decay evaluation
+	default:
+		return m.State
+	}
+
+	localInterval := time.Duration(p.LivenessInterval) * time.Second
+	if localInterval == 0 {
+		localInterval = 30 * time.Second
+	}
+
+	// OPERATIONAL means "I can reach this peer", proven by our OUTBOUND
+	// beat round-trip succeeding. So the decay keys on sinceS — time since
+	// our last SUCCESSFUL outbound beat (LastBeatSent is stamped only on
+	// success). We deliberately do NOT decay on inbound silence
+	// (LastBeatRecv): a peer that stops beating US is a problem on the
+	// other direction's axis, surfaced by the gossip matrix, not by our
+	// own reachability state. A zero LastBeatSent means "no successful
+	// beat yet" — treat as infinitely old so a mechanism that is marked
+	// operational without beat evidence decays out.
+	sinceS := timeSinceOrInf(m.LastBeatSent)
+
+	if sinceS > 10*localInterval {
+		return PeerStateInterrupted
+	}
+	if sinceS > 2*localInterval {
+		return PeerStateDegraded
+	}
+	return PeerStateOperational
+}
+
+func timeSinceOrInf(t time.Time) time.Duration {
+	if t.IsZero() {
+		return 1<<62 - 1 // effectively infinite
+	}
+	return time.Since(t)
 }
 
 // SetMechanismState updates the per-mechanism state. Creates the
@@ -301,6 +361,25 @@ func (p *Peer) SetMechanismLastBeatRecv(name string, t time.Time) {
 		p.Mechanisms[name] = m
 	}
 	m.LastBeatRecv = t
+}
+
+// SetMechanismLastBeatSent records the time a Beat was last sent on the
+// named mechanism. Used by liveness/age evaluation to detect a peer we
+// can no longer reach (no successful outbound beat for N intervals).
+// Same locking contract as SetMechanismLastBeatRecv.
+func (p *Peer) SetMechanismLastBeatSent(name string, t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.LastBeatSent = t
 }
 
 // SetMechanismContactInfo sets the discovery contact-info status for a
