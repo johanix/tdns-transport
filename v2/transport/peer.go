@@ -415,6 +415,24 @@ func (p *Peer) MechanismContactInfo(name string) string {
 	return ""
 }
 
+// MechanismEffectiveState returns the named mechanism's state with
+// age-based liveness decay applied (the same decay EffectiveState uses,
+// but for a single mechanism rather than the cross-mechanism best). The
+// bool is false if the mechanism is not present. Used by per-transport
+// display rows that want the canonical, decayed per-mechanism state.
+func (p *Peer) MechanismEffectiveState(name string) (PeerState, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Mechanisms == nil {
+		return PeerState(0), false
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		return PeerState(0), false
+	}
+	return p.decayedMechanismState(m), true
+}
+
 // AgentMechanismSnapshot is a point-in-time view of one mechanism's
 // state on an Agent (in tdns-mp terms). PopulateFromAgent uses
 // instances of this struct to fill MechanismState entries on a Peer.
