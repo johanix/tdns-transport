@@ -8,6 +8,7 @@ package transport
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 // Test handler that records calls
 type testHandler struct {
 	name      string
-	called    int
+	called    atomic.Int64
 	shouldErr bool
 }
 
 func (h *testHandler) Handle(ctx *MessageContext) error {
-	h.called++
+	h.called.Add(1)
 	if h.shouldErr {
 		return errors.New("test error")
 	}
@@ -32,13 +33,13 @@ func (h *testHandler) Handle(ctx *MessageContext) error {
 // Test middleware that records calls
 type testMiddleware struct {
 	name      string
-	called    int
+	called    atomic.Int64
 	shouldErr bool
 	skipNext  bool
 }
 
 func (m *testMiddleware) Middleware(ctx *MessageContext, next MessageHandlerFunc) error {
-	m.called++
+	m.called.Add(1)
 	if m.shouldErr {
 		return errors.New("middleware error")
 	}
@@ -146,8 +147,8 @@ func TestRouteSuccess(t *testing.T) {
 		t.Fatalf("Route failed: %v", err)
 	}
 
-	if handler.called != 1 {
-		t.Errorf("expected handler called once, got %d", handler.called)
+	if handler.called.Load() != 1 {
+		t.Errorf("expected handler called once, got %d", handler.called.Load())
 	}
 
 	metrics := router.GetMetrics()
@@ -214,14 +215,14 @@ func TestMiddlewareChain(t *testing.T) {
 	}
 
 	// Verify execution order: mw1 -> mw2 -> handler
-	if mw1.called != 1 {
-		t.Errorf("expected mw1 called once, got %d", mw1.called)
+	if mw1.called.Load() != 1 {
+		t.Errorf("expected mw1 called once, got %d", mw1.called.Load())
 	}
-	if mw2.called != 1 {
-		t.Errorf("expected mw2 called once, got %d", mw2.called)
+	if mw2.called.Load() != 1 {
+		t.Errorf("expected mw2 called once, got %d", mw2.called.Load())
 	}
-	if handler.called != 1 {
-		t.Errorf("expected handler called once, got %d", handler.called)
+	if handler.called.Load() != 1 {
+		t.Errorf("expected handler called once, got %d", handler.called.Load())
 	}
 }
 
@@ -240,8 +241,8 @@ func TestMiddlewareError(t *testing.T) {
 	}
 
 	// Handler should not be called
-	if handler.called != 0 {
-		t.Errorf("expected handler not called, got %d calls", handler.called)
+	if handler.called.Load() != 0 {
+		t.Errorf("expected handler not called, got %d calls", handler.called.Load())
 	}
 }
 
@@ -260,8 +261,8 @@ func TestMiddlewareSkipNext(t *testing.T) {
 	}
 
 	// Handler should not be called
-	if handler.called != 0 {
-		t.Errorf("expected handler not called, got %d calls", handler.called)
+	if handler.called.Load() != 0 {
+		t.Errorf("expected handler not called, got %d calls", handler.called.Load())
 	}
 }
 
@@ -280,11 +281,11 @@ func TestMultipleHandlersSameType(t *testing.T) {
 	}
 
 	// Both handlers should be called
-	if h1.called != 1 {
-		t.Errorf("expected h1 called once, got %d", h1.called)
+	if h1.called.Load() != 1 {
+		t.Errorf("expected h1 called once, got %d", h1.called.Load())
 	}
-	if h2.called != 1 {
-		t.Errorf("expected h2 called once, got %d", h2.called)
+	if h2.called.Load() != 1 {
+		t.Errorf("expected h2 called once, got %d", h2.called.Load())
 	}
 }
 
@@ -452,8 +453,8 @@ func TestConcurrentAccess(t *testing.T) {
 		<-done
 	}
 
-	if handler.called != 10 {
-		t.Errorf("expected 10 calls, got %d", handler.called)
+	if handler.called.Load() != 10 {
+		t.Errorf("expected 10 calls, got %d", handler.called.Load())
 	}
 
 	metrics := router.GetMetrics()
