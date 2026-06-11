@@ -2,20 +2,14 @@ module github.com/johanix/tdns-transport/v2
 
 go 1.25.2
 
-replace (
-	github.com/johanix/tdns/v2 => ../../tdns/v2
-	github.com/johanix/tdns/v2/cache => ../../tdns/v2/cache
-	github.com/johanix/tdns/v2/core => ../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
-	github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
-)
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
 
 require (
 	github.com/cloudflare/circl v1.6.3
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
-	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9
 	github.com/miekg/dns v1.1.70
 )
 
@@ -30,7 +24,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
