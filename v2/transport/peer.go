@@ -68,6 +68,8 @@ type Peer struct {
 	DiscoveryAddr   *Address // Address discovered via DNS (URI/SVCB records)
 	OperationalAddr *Address // Private address from Relocate (for DDoS mitigation)
 	APIEndpoint     string   // Full URL for API transport (when available)
+	DNSEndpoint     string   // Full dns:// URL for DNS transport (display/diagnostics;
+	//                          the resolved IP lives in DiscoveryAddr/Mechanisms["DNS"].Address)
 
 	// Cryptographic identity
 	LongTermPubKey crypto.PublicKey // Peer's long-term public key
