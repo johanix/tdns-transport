@@ -417,6 +417,21 @@ func (p *Peer) MechanismContactInfo(name string) string {
 	return ""
 }
 
+// MechanismBeatSequence returns the count of beats successfully sent on
+// the named mechanism, or 0 if the mechanism is unknown. Maintained by
+// RecordMechanismBeatSent on the transport's own Beat() success path.
+func (p *Peer) MechanismBeatSequence(name string) uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.Mechanisms == nil {
+		return 0
+	}
+	if m, ok := p.Mechanisms[name]; ok && m != nil {
+		return m.BeatSequence
+	}
+	return 0
+}
+
 // MechanismEffectiveState returns the named mechanism's state with
 // age-based liveness decay applied (the same decay EffectiveState uses,
 // but for a single mechanism rather than the cross-mechanism best). The
