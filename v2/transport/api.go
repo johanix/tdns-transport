@@ -158,6 +158,11 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 			fmt.Errorf("failed to unmarshal response: %w", err), false)
 	}
 
+	if !apiResp.Error {
+		peer.RecordBeatSent()
+		peer.Stats.RecordMessageSent("beat")
+	}
+
 	return &BeatResponse{
 		ResponderID: apiResp.Identity,
 		Timestamp:   time.Now(),

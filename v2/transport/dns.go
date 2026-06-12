@@ -313,6 +313,11 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		}, nil
 	}
 
+	if resp.Status == ConfirmSuccess {
+		peer.RecordBeatSent()
+		peer.Stats.RecordMessageSent("beat")
+	}
+
 	return &BeatResponse{
 		ResponderID: peer.ID,
 		Timestamp:   time.Now(),
