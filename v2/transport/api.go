@@ -159,8 +159,7 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	if !apiResp.Error {
-		peer.RecordBeatSent()
-		peer.Stats.RecordMessageSent("beat")
+		peer.RecordMechanismBeatSent("API")
 	}
 
 	return &BeatResponse{

@@ -314,8 +314,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	if resp.Status == ConfirmSuccess {
-		peer.RecordBeatSent()
-		peer.Stats.RecordMessageSent("beat")
+		peer.RecordMechanismBeatSent("DNS")
 	}
 
 	return &BeatResponse{

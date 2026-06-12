@@ -730,6 +730,30 @@ func (p *Peer) RecordBeatSent() {
 	p.BeatSequence++
 }
 
+// RecordMechanismBeatSent records a successfully-sent beat on the named
+// mechanism ("API"/"DNS"): it bumps the per-mechanism BeatSequence and
+// LastBeatSent and the top-level aggregate, and counts the send in Stats.
+// Called by the transport's own Beat() success path so BeatSequence/Stats
+// are maintained transport-internally (no MP write-back required).
+func (p *Peer) RecordMechanismBeatSent(name string) {
+	now := time.Now()
+	p.mu.Lock()
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.LastBeatSent = now
+	m.BeatSequence++
+	p.LastBeatSent = now
+	p.BeatSequence++
+	p.mu.Unlock()
+	p.Stats.RecordMessageSent("beat")
+}
+
 // RecordBeatReceived records that a beat was received.
 func (p *Peer) RecordBeatReceived() {
 	p.mu.Lock()
