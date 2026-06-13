@@ -581,6 +581,18 @@ func (p *Peer) GetState() PeerState {
 	return p.State
 }
 
+// SetLivenessInterval sets OUR local beat interval (seconds) for this peer:
+// how often we beat it. The decay-on-read in EffectiveState() keys its
+// DEGRADED/INTERRUPTED thresholds on this, so it MUST match the cadence we
+// actually beat this peer at — otherwise a healthy peer beaten on a slow
+// schedule (e.g. infra peers at 600s) decays to INTERRUPTED under the 30s
+// default. A zero value leaves the 30s default in place.
+func (p *Peer) SetLivenessInterval(seconds uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.LivenessInterval = seconds
+}
+
 // CurrentAddress returns the address to use for communication.
 // Prefers OperationalAddr if available (post-Relocate), falls back to DiscoveryAddr.
 func (p *Peer) CurrentAddress() *Address {
