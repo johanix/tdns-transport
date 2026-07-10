@@ -127,35 +127,27 @@ type TransportManager struct {
 	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 	OnDiscoveryFailed func(peer *Peer, err error)
 
-	// DiscoveryDriver is a TEMPORARY seam that lets the explicit
-	// DiscoverPeer method on TransportManager delegate to the
-	// application's existing discovery code. Phase 6 part 2 of the
-	// transport interface redesign moves the discovery loop into
-	// transport and deletes this interface.
+	// GetImr late-binds the IMR resolver used by the in-package discovery
+	// process (the resolver starts asynchronously after the manager is
+	// constructed). Set by the application at startup; nil means fresh
+	// discovery cannot run (DiscoverPeer only returns already-known
+	// peers).
 	//
-	// Optional. If nil, DiscoverPeer can still return peers that
-	// are already KNOWN, but cannot trigger fresh discovery.
-	//
-	// See Bite F in
-	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
-	DiscoveryDriver DiscoveryDriver
+	// Phase 2.6: replaces the TEMPORARY DiscoveryDriver seam — the
+	// discovery process now lives in this package (discovery.go).
+	GetImr func() *Imr
 
 	// Which mechanisms are active
 	supportedMechanisms []string
 }
 
-// DiscoveryDriver is a TEMPORARY interface (Bite F): the application
-// supplies a synchronous discovery primitive that
-// TransportManager.DiscoverPeer can call when a peer needs fresh
-// discovery. Deleted by Phase 6 part 2 of the transport interface
-// redesign, when discovery moves into the transport package.
-type DiscoveryDriver interface {
-	// RunDiscovery performs one synchronous discovery attempt for
-	// the peer's identity (`peer.ID`). On success the peer is
-	// expected to be in PeerStateKnown (or higher) when the call
-	// returns. On failure returns an error and leaves the peer in
-	// whatever state the application's discovery code chose.
-	RunDiscovery(ctx context.Context, peer *Peer) error
+// SetSupportedMechanisms sets the active mechanism set for managers
+// constructed via struct literal rather than NewTransportManager (tdns-mp
+// builds its bridge that way). The in-package discovery process consults
+// this via IsTransportSupported (Fix E: only locally-supported transports
+// are probed).
+func (tm *TransportManager) SetSupportedMechanisms(mechanisms []string) {
+	tm.supportedMechanisms = mechanisms
 }
 
 // NewTransportManager creates and wires all transport components.
@@ -398,10 +390,10 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 //
 // If a peer with this identity is already in PeerStateKnown (or
 // higher), DiscoverPeer returns it immediately without re-discovery.
-// Otherwise it delegates to tm.DiscoveryDriver — currently a
-// TEMPORARY seam back into the application's existing discovery
-// loop. When tm.DiscoveryDriver is nil, DiscoverPeer can only
-// return already-known peers; an unknown identity yields an error.
+// Otherwise the in-package discovery process runs (discovery.go —
+// Phase 2.6; the TEMPORARY DiscoveryDriver seam is gone). When
+// tm.GetImr is nil, DiscoverPeer can only return already-known
+// peers; an unknown identity yields an error.
 //
 // The asynchronous discovery path (the application's polling loop
 // that watches for NEEDED peers) is unaffected by this method.
@@ -409,11 +401,6 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 // goroutine — DiscoverPeer is intentionally synchronous so that
 // CLI commands, tests, and other inline callers can use the result
 // immediately.
-//
-// Phase 6 part 2 of the transport interface redesign moves
-// discovery into transport and removes the DiscoveryDriver
-// indirection. See Bite F in
-// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
 func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (*Peer, error) {
 	if identity == "" {
 		return nil, fmt.Errorf("DiscoverPeer: empty identity")
@@ -422,14 +409,14 @@ func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (
 	if peer.EffectiveState() >= PeerStateKnown {
 		return peer, nil
 	}
-	if tm.DiscoveryDriver == nil {
-		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no DiscoveryDriver configured", identity)
+	if tm.GetImr == nil {
+		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no IMR accessor configured", identity)
 	}
-	if err := tm.DiscoveryDriver.RunDiscovery(ctx, peer); err != nil {
+	if err := tm.DiscoverAndRegisterPeer(ctx, identity); err != nil {
 		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
 	}
 	if peer.EffectiveState() < PeerStateKnown {
-		return nil, fmt.Errorf("DiscoverPeer: driver returned nil but peer %q state is %v, expected >= Known",
+		return nil, fmt.Errorf("DiscoverPeer: discovery succeeded but peer %q state is %v, expected >= Known",
 			identity, peer.EffectiveState())
 	}
 	return peer, nil
