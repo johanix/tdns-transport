@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // PeerState represents the current state of a peer relationship.
@@ -108,6 +110,13 @@ type Peer struct {
 	// during the dual-write window. The legacy fields remain canonical
 	// until Phase 1 of the main refactor deletes them.
 	Mechanisms map[string]*MechanismState
+
+	// Per-mechanism cryptographic material discovered for this peer
+	// (Phase 2.5: moved from tdns-mp's transitional agentMeta sidecar so
+	// transport.Peer owns ALL per-peer connection+crypto state). Keys:
+	// "API", "DNS". Access ONLY via the MechanismTLSA/JWK/KeyRR accessors
+	// (they hold p.mu); lazily allocated.
+	mechanismCrypto map[string]*MechanismCrypto
 }
 
 // MechanismState tracks per-mechanism (e.g. "API", "DNS") state for a
@@ -133,6 +142,20 @@ type MechanismState struct {
 	// mechanism's endpoint is discovered (e.g. "complete"). Empty for peers
 	// that were never discovered (config-only infra peers).
 	ContactInfo string
+}
+
+// MechanismCrypto is the per-mechanism cryptographic material discovered for
+// a peer: the TLSA record backing API mTLS verification, and the JWK / legacy
+// KEY material backing DNS payload crypto. Phase 2.5: moved here from
+// tdns-mp's transitional agentMeta sidecar (the addendum's deferred "E1
+// crypto move") — transport.Peer is the sole per-peer state owner. The RR
+// pointers are treated as immutable once set (discovery replaces, never
+// mutates in place).
+type MechanismCrypto struct {
+	KeyRR        *dns.KEY  // SIG(0) KEY record (DNS legacy fallback)
+	TlsaRR       *dns.TLSA // TLSA record (API mTLS verification)
+	JWKData      string    // JWK JSON (DNS payload crypto)
+	KeyAlgorithm string    // JWK algorithm name
 }
 
 // MessageStats tracks detailed statistics for messages exchanged with a peer.
@@ -326,6 +349,79 @@ func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
 	m.State = state
 	m.StateReason = reason
 	m.StateChanged = time.Now()
+}
+
+// ensureMechanismCryptoLocked returns the crypto entry for the named
+// mechanism, allocating map + entry lazily. Caller MUST hold p.mu.
+func (p *Peer) ensureMechanismCryptoLocked(name string) *MechanismCrypto {
+	if p.mechanismCrypto == nil {
+		p.mechanismCrypto = make(map[string]*MechanismCrypto)
+	}
+	c, ok := p.mechanismCrypto[name]
+	if !ok || c == nil {
+		c = &MechanismCrypto{}
+		p.mechanismCrypto[name] = c
+	}
+	return c
+}
+
+// SetMechanismTLSA records the discovered TLSA record for the named
+// mechanism (replace semantics: re-discovery overwrites, including to nil).
+func (p *Peer) SetMechanismTLSA(name string, tlsa *dns.TLSA) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensureMechanismCryptoLocked(name).TlsaRR = tlsa
+}
+
+// SetMechanismJWK records the discovered JWK material for the named
+// mechanism. Callers gate on non-empty JWK data (re-discovery must not wipe
+// a previously discovered JWK with an empty result — the same merge
+// semantics the MP sidecar had).
+func (p *Peer) SetMechanismJWK(name, jwkData, keyAlgorithm string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.ensureMechanismCryptoLocked(name)
+	c.JWKData = jwkData
+	c.KeyAlgorithm = keyAlgorithm
+}
+
+// SetMechanismKeyRR records the discovered legacy SIG(0) KEY record for the
+// named mechanism (replace semantics, like SetMechanismTLSA).
+func (p *Peer) SetMechanismKeyRR(name string, key *dns.KEY) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensureMechanismCryptoLocked(name).KeyRR = key
+}
+
+// MechanismTLSA returns the mechanism's discovered TLSA record, or nil.
+func (p *Peer) MechanismTLSA(name string) *dns.TLSA {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if c := p.mechanismCrypto[name]; c != nil {
+		return c.TlsaRR
+	}
+	return nil
+}
+
+// MechanismJWK returns the mechanism's discovered JWK data + algorithm
+// (empty strings if none).
+func (p *Peer) MechanismJWK(name string) (jwkData, keyAlgorithm string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if c := p.mechanismCrypto[name]; c != nil {
+		return c.JWKData, c.KeyAlgorithm
+	}
+	return "", ""
+}
+
+// MechanismKeyRR returns the mechanism's discovered legacy KEY record, or nil.
+func (p *Peer) MechanismKeyRR(name string) *dns.KEY {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if c := p.mechanismCrypto[name]; c != nil {
+		return c.KeyRR
+	}
+	return nil
 }
 
 // SetMechanismLastHelloRecv records the time a Hello was last received
