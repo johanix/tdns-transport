@@ -74,6 +74,13 @@ type ChunkNotifyHandler struct {
 	// Used by HandleBeat to include gossip in beat responses.
 	GossipForPeer func(peerID string) json.RawMessage
 
+	// ParseApp is the application's payload parser (C5). After transport
+	// has fetched and decrypted the payload it calls ParseApp to obtain
+	// the verb (TypeToken), the application-level sender, the scope
+	// (zone) and the nonce; the field names inside the payload are the
+	// application's business. If nil, transport's built-in parser is used.
+	ParseApp func(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error)
+
 	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
 	// Used when Transport is nil (combiner/signer mode) for chunk_mode=query fallback.
 	// If nil and Transport is nil, query mode is not supported.
@@ -482,8 +489,13 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		lgTransport().Debug("successfully decrypted payload", "source", sourceAddr, "key_for", senderHint)
 	}
 
-	// Parse payload to normalize message format (converts numeric MessageType to string Type)
-	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
+	// Parse payload: the application's parser if installed (C5), else the
+	// built-in one. Either way the result carries the verb transport routes on.
+	parse := h.parsePayload
+	if h.ParseApp != nil {
+		parse = h.ParseApp
+	}
+	incomingMsg, err := parse(distributionID, payload, sourceAddr)
 	if err != nil {
 		lgTransport().Error("failed to parse payload", "err", err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
