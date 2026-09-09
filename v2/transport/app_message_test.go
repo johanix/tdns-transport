@@ -23,7 +23,7 @@ func TestIncomingMessageToken(t *testing.T) {
 
 func TestParseIncomingMessageSetsTypeToken(t *testing.T) {
 	for _, payload := range []string{`{"MessageType":"rfi","OriginatorID":"a.","Zone":"z."}`, `{"type":"relocate","sender_id":"a."}`} {
-		m := parseIncomingMessage([]byte(payload))
+		m := ParseIncomingMessage([]byte(payload))
 		if m == nil {
 			t.Fatalf("parse failed for %s", payload)
 		}
