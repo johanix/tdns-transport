@@ -878,6 +878,14 @@ func RouteToCallback(fn func(*IncomingMessage)) MiddlewareFunc {
 			return err
 		}
 
+		// A verb with no registered handler was answered REFUSED by
+		// DefaultUnsupportedHandler. It must not also be delivered to the
+		// application: before this guard an agent processed an "update"
+		// it had just refused on the wire (C0.5 dispatch gate).
+		if _, unhandled := ctx.Data["unhandled_message_type"]; unhandled {
+			return nil
+		}
+
 		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
 			fn(incomingMsg)
 		}
