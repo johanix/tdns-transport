@@ -9,8 +9,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/johanix/tdns-transport/v2/crypto"
 	_ "github.com/johanix/tdns-transport/v2/crypto/jose"
@@ -24,6 +27,7 @@ func main() {
 	ok = testPeerRegistry() && ok
 	ok = testMiddleware() && ok
 	ok = testCryptoBackend() && ok
+	ok = testDiscovery() && ok
 
 	if ok {
 		fmt.Println("\nPASS: all transport-exercise checks passed")
@@ -209,5 +213,55 @@ func testCryptoBackend() bool {
 	}
 	fmt.Printf("  OK: JOSE backend registered: %s\n", backend.Name())
 
+	return true
+}
+
+// testDiscovery exercises the discovery surface a non-MP consumer sees
+// (transport redesign, Stage E residual): DiscoverPeer's short-circuit for
+// an already-known peer, its clean failure without a resolver, and the
+// registration contract that a discovered endpoint without a verification
+// key is refused. No network is touched.
+func testDiscovery() bool {
+	fmt.Println("--- Discovery ---")
+	tm := transport.NewTransportManager(&transport.TransportManagerConfig{
+		LocalID:             "exercise.example.",
+		ControlZone:         "mp-control.example.",
+		SupportedMechanisms: []string{"dns"},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// No resolver configured: an unknown identity must fail cleanly.
+	if _, err := tm.DiscoverPeer(ctx, "unknown.example."); err == nil || !strings.Contains(err.Error(), "no IMR accessor") {
+		fmt.Printf("  FAIL: DiscoverPeer without IMR: err=%v\n", err)
+		return false
+	}
+	fmt.Println("  OK: unknown peer without a resolver fails cleanly")
+
+	// An identity already at KNOWN is returned without a resolver.
+	seeded := tm.PeerRegistry.GetOrCreate("known.example.")
+	seeded.SetState(transport.PeerStateKnown, "seeded by transport-exercise")
+	got, err := tm.DiscoverPeer(ctx, "known.example.")
+	if err != nil || got == nil || got.ID != "known.example." {
+		fmt.Printf("  FAIL: DiscoverPeer for a KNOWN peer: got=%v err=%v\n", got, err)
+		return false
+	}
+	fmt.Println("  OK: known peer returned without discovery")
+
+	// A discovered endpoint without a verification key is refused (the
+	// receive path needs the key to decrypt), and the completion seam
+	// does not fire for it.
+	fired := false
+	tm.OnPeerDiscovered = func(p *transport.Peer) { fired = true }
+	err = tm.RegisterDiscoveredPeer(&transport.DiscoveryResult{
+		Identity:     "found.example.",
+		DNSUri:       "dns://dns.found.example.:8054/",
+		DNSAddresses: []string{"192.0.2.10"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "verification key") || fired {
+		fmt.Printf("  FAIL: RegisterDiscoveredPeer without key: err=%v fired=%v\n", err, fired)
+		return false
+	}
+	fmt.Println("  OK: endpoint without verification key refused; OnPeerDiscovered not fired")
 	return true
 }
