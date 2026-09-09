@@ -302,7 +302,6 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 //
 //   - *AppMessage     → Transport.SendApp (all application verbs; C2)
 //   - *PingRequest    → Transport.Ping
-//   - *RelocateRequest → Transport.Relocate
 //
 // (Hello and Beat are deliberately NOT supported by this generic
 // path. In the current codebase those operations send on all
@@ -311,8 +310,7 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // in. Wrapping them under a generic Send would change semantics.
 // Phase 5 of the main refactor will address that separately.)
 //
-// Returns the response (one of *AppResponse, *PingResponse,
-// *RelocateResponse) or an error if both transports failed or the
+// Returns the response (one of *AppResponse, *PingResponse) or an error if both transports failed or the
 // message type is unsupported.
 //
 // Bite 3 of the transport refactor early-bites plan; see
@@ -344,8 +342,6 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 			return resp, nil
 		case *PingRequest:
 			return t.Ping(ctx, peer, r)
-		case *RelocateRequest:
-			return t.Relocate(ctx, peer, r)
 		default:
 			return nil, fmt.Errorf("Send: unsupported message type %T (use Hello/Beat directly for parallel-send semantics)", req)
 		}

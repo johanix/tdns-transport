@@ -66,21 +66,3 @@ func ParseBeatPayload(payload []byte) (*DnsBeatPayload, error) {
 	}
 	return &p, nil
 }
-
-// ParseSyncPayload parses a sync message payload.
-func ParseSyncPayload(payload []byte) (*DnsSyncPayload, error) {
-	var p DnsSyncPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-// ParseRelocatePayload parses a relocate message payload.
-func ParseRelocatePayload(payload []byte) (*DnsRelocatePayload, error) {
-	var p DnsRelocatePayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}

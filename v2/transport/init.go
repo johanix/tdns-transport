@@ -62,14 +62,10 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 			// Parse and handle beat
 			payload, _ := transport.ParseBeatPayload(msg.Payload)
 			// ... handle heartbeat
-		case "sync":
-			// Parse and handle sync
-			payload, _ := transport.ParseSyncPayload(msg.Payload)
-			// ... handle sync request, send confirmation
-		case "relocate":
-			// Parse and handle relocate
-			payload, _ := transport.ParseRelocatePayload(msg.Payload)
-			// ... handle address relocation
+		default:
+			// Application verbs (sync, keystate, ...): msg.Token() is the
+			// verb, msg.Payload the application's own JSON — parse it with
+			// the application's types (they do not live in this package).
 		}
 	}
 

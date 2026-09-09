@@ -7,8 +7,6 @@
 package transport
 
 import (
-	"encoding/json"
-
 	"github.com/miekg/dns"
 )
 
@@ -152,46 +150,4 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	lgTransport().Info("router initialization complete")
 
 	return nil
-}
-
-// DetermineMessageType parses the payload to determine the message type.
-// Reads the "MessageType" field (e.g. "sync", "update", "beat", "ping").
-func DetermineMessageType(payload []byte) MessageType {
-	var fields struct {
-		MessageType string `json:"MessageType"`
-	}
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return MessageTypeUnknown
-	}
-
-	switch fields.MessageType {
-	case "hello":
-		return MessageType("hello")
-	case "beat":
-		return MessageType("beat")
-	case "sync":
-		return MessageType("sync")
-	case "update":
-		return MessageType("update")
-	case "ping":
-		return MessageType("ping")
-	case "confirm":
-		return MessageType("confirm")
-	case "relocate":
-		return MessageType("relocate")
-	case "rfi":
-		return MessageType("rfi")
-	case "keystate":
-		return MessageType("keystate")
-	case "edits":
-		return MessageType("edits")
-	case "config":
-		return MessageType("config")
-	case "audit":
-		return MessageType("audit")
-	case "status-update":
-		return MessageType("status-update")
-	default:
-		return MessageTypeUnknown
-	}
 }

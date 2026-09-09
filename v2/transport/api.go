@@ -169,44 +169,6 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}, nil
 }
 
-// Relocate requests a peer to use a different address via HTTPS API.
-func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error) {
-	url, err := apiURL(peer, "/relocate")
-	if err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID, err, false)
-	}
-
-	apiReq := &apiRelocateRequest{
-		MessageType: "RELOCATE",
-		MyIdentity:  req.SenderID,
-		NewAddress: apiAddress{
-			Host:      req.NewAddress.Host,
-			Port:      req.NewAddress.Port,
-			Transport: req.NewAddress.Transport,
-			Path:      req.NewAddress.Path,
-		},
-		Reason:     req.Reason,
-		ValidUntil: req.ValidUntil.Unix(),
-	}
-	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
-	if err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID, err, true)
-	}
-
-	var apiResp apiRelocateResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID,
-			fmt.Errorf("failed to unmarshal response: %w", err), false)
-	}
-
-	return &RelocateResponse{
-		ResponderID: apiResp.Identity,
-		Accepted:    apiResp.Accepted,
-		Message:     apiResp.Msg,
-		Timestamp:   time.Now(),
-	}, nil
-}
-
 // Ping sends a lightweight liveness probe to a peer via HTTPS API.
 func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
 	url, err := apiURL(peer, "/sync/ping")
@@ -364,29 +326,6 @@ type apiSyncResponse struct {
 	Msg            string `json:"msg,omitempty"`
 	Error          bool   `json:"error"`
 	ErrorMsg       string `json:"error_msg,omitempty"`
-}
-
-type apiAddress struct {
-	Host      string `json:"host"`
-	Port      uint16 `json:"port"`
-	Transport string `json:"transport"`
-	Path      string `json:"path,omitempty"`
-}
-
-type apiRelocateRequest struct {
-	MessageType string     `json:"message_type"`
-	MyIdentity  string     `json:"my_identity"`
-	NewAddress  apiAddress `json:"new_address"`
-	Reason      string     `json:"reason"`
-	ValidUntil  int64      `json:"valid_until"`
-}
-
-type apiRelocateResponse struct {
-	Identity string `json:"identity,omitempty"`
-	Accepted bool   `json:"accepted"`
-	Msg      string `json:"msg,omitempty"`
-	Error    bool   `json:"error"`
-	ErrorMsg string `json:"error_msg,omitempty"`
 }
 
 type apiPingRequest struct {

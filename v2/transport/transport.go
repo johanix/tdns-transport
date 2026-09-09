@@ -64,10 +64,6 @@ type Transport interface {
 	// send methods are gone.
 	SendApp(ctx context.Context, peer *Peer, msg *AppMessage) (*AppResponse, error)
 
-	// Relocate requests the peer to use a different address for future communication.
-	// Used for DDoS mitigation after discovery is complete.
-	Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error)
-
 	// Confirm sends acknowledgment of a received sync operation.
 	Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error
 
@@ -121,25 +117,6 @@ type BeatResponse struct {
 	Gossip      json.RawMessage // Gossip from responder (if any)
 }
 
-// RelocateRequest asks a peer to use a different address.
-// This is used for DDoS mitigation: after discovery via well-known
-// addresses, agents can relocate to private addresses.
-type RelocateRequest struct {
-	SenderID   string    // Identity of the sender
-	NewAddress Address   // The new address to use
-	Reason     string    // Why we're relocating (e.g., "ddos-mitigation")
-	ValidUntil time.Time // When this address should be refreshed
-	Signature  []byte    // Signature proving we control the new address
-}
-
-// RelocateResponse acknowledges a relocation request.
-type RelocateResponse struct {
-	ResponderID string    // Identity of the responder
-	Accepted    bool      // Whether relocation was accepted
-	Message     string    // Optional message
-	Timestamp   time.Time // Response timestamp
-}
-
 // PingRequest is a lightweight liveness probe.
 type PingRequest struct {
 	SenderID  string    // Identity of the sender
@@ -154,16 +131,6 @@ type PingResponse struct {
 	OK          bool          // True if responder acknowledged
 	Timestamp   time.Time     // Response timestamp
 	RTT         time.Duration // Round-trip time (measured by sender)
-}
-
-// KeyInventoryEntry describes a single DNSKEY in a KEYSTATE inventory message.
-// Used when Signal == "inventory" to carry the complete set of keys for a zone.
-type KeyInventoryEntry struct {
-	KeyTag    uint16 `json:"key_tag"`
-	Algorithm uint8  `json:"algorithm"`
-	Flags     uint16 `json:"flags"`
-	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
-	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 }
 
 // ConfirmRequest confirms receipt and processing of a sync operation.

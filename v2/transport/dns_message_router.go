@@ -21,13 +21,7 @@ import (
 type MessageType string
 
 const (
-	MessageTypeChunkNotify MessageType = "CHUNK_NOTIFY"
-	MessageTypeChunkQuery  MessageType = "CHUNK_QUERY"
-	MessageTypeHello       MessageType = "HELLO"
-	MessageTypeBeat        MessageType = "BEAT"
-	MessageTypeRelocate    MessageType = "RELOCATE"
-	MessageTypeUpdate      MessageType = "UPDATE"
-	MessageTypeUnknown     MessageType = "UNKNOWN"
+	MessageTypeUnknown MessageType = "UNKNOWN"
 )
 
 // MessageContext holds all context needed for message processing.

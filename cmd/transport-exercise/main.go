@@ -40,7 +40,7 @@ func testRouter() bool {
 	// Register handlers for two message types
 	var beatCalled, syncCalled bool
 
-	err := router.Register("test-beat", transport.MessageTypeBeat,
+	err := router.Register("test-beat", transport.MessageType("beat"),
 		func(ctx *transport.MessageContext) error {
 			beatCalled = true
 			ctx.Data["handled"] = "beat"
@@ -54,7 +54,7 @@ func testRouter() bool {
 		return false
 	}
 
-	err = router.Register("test-update", transport.MessageTypeUpdate,
+	err = router.Register("test-update", transport.MessageType("update"),
 		func(ctx *transport.MessageContext) error {
 			syncCalled = true
 			ctx.Data["handled"] = "update"
@@ -70,7 +70,7 @@ func testRouter() bool {
 	msg := new(dns.Msg)
 	msg.SetQuestion("test.example.", dns.TypeNS)
 	ctx := transport.NewMessageContext(msg, "192.0.2.1:53")
-	if err := router.Route(ctx, transport.MessageTypeBeat); err != nil {
+	if err := router.Route(ctx, transport.MessageType("beat")); err != nil {
 		fmt.Printf("  FAIL: route beat: %v\n", err)
 		return false
 	}
@@ -82,7 +82,7 @@ func testRouter() bool {
 
 	// Route an update message
 	ctx2 := transport.NewMessageContext(msg, "192.0.2.2:53")
-	if err := router.Route(ctx2, transport.MessageTypeUpdate); err != nil {
+	if err := router.Route(ctx2, transport.MessageType("update")); err != nil {
 		fmt.Printf("  FAIL: route update: %v\n", err)
 		return false
 	}
@@ -113,7 +113,7 @@ func testRouter() bool {
 	fmt.Println("  OK: default handler caught unknown type")
 
 	// Duplicate registration — should fail
-	err = router.Register("test-beat", transport.MessageTypeBeat,
+	err = router.Register("test-beat", transport.MessageType("beat"),
 		func(ctx *transport.MessageContext) error { return nil },
 	)
 	if err == nil {
@@ -168,7 +168,7 @@ func testMiddleware() bool {
 		return err
 	})
 
-	_ = router.Register("test", transport.MessageTypeBeat,
+	_ = router.Register("test", transport.MessageType("beat"),
 		func(ctx *transport.MessageContext) error {
 			order = append(order, "handler")
 			return nil
@@ -177,7 +177,7 @@ func testMiddleware() bool {
 
 	msg := new(dns.Msg)
 	ctx := transport.NewMessageContext(msg, "192.0.2.1:53")
-	if err := router.Route(ctx, transport.MessageTypeBeat); err != nil {
+	if err := router.Route(ctx, transport.MessageType("beat")); err != nil {
 		fmt.Printf("  FAIL: route with middleware: %v\n", err)
 		return false
 	}
