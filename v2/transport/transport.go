@@ -12,37 +12,7 @@ import (
 	"crypto"
 	"encoding/json"
 	"time"
-
-	"github.com/johanix/tdns/v2/core"
 )
-
-// SyncType identifies what type of data is being synchronized.
-type SyncType uint8
-
-const (
-	SyncTypeNS     SyncType = iota + 1 // NS record coordination
-	SyncTypeDNSKEY                     // DNSKEY sharing for multi-signer
-	SyncTypeGLUE                       // Glue record coordination
-	SyncTypeCDS                        // CDS/CDNSKEY for key rollover
-	SyncTypeCSYNC                      // CSYNC for delegation updates
-)
-
-func (s SyncType) String() string {
-	switch s {
-	case SyncTypeNS:
-		return "NS"
-	case SyncTypeDNSKEY:
-		return "DNSKEY"
-	case SyncTypeGLUE:
-		return "GLUE"
-	case SyncTypeCDS:
-		return "CDS"
-	case SyncTypeCSYNC:
-		return "CSYNC"
-	default:
-		return "UNKNOWN"
-	}
-}
 
 // ConfirmStatus indicates the result of processing a sync operation.
 type ConfirmStatus uint8
@@ -151,41 +121,6 @@ type BeatResponse struct {
 	Gossip      json.RawMessage // Gossip from responder (if any)
 }
 
-// SyncRequest represents a data synchronization request.
-// Important: All sync operations are zone-specific. An agent can only
-// make statements about zones and data under its own control.
-type SyncRequest struct {
-	SenderID       string                   // Identity of the sender
-	Zone           string                   // The zone this sync applies to (FQDN)
-	SyncType       SyncType                 // What type of data is being synced
-	Records        map[string][]string      // RRs grouped by owner name (legacy: Class-overloaded)
-	Operations     []core.RROperation       // Explicit operations (takes precedence over Records)
-	Timestamp      time.Time                // When this data was generated
-	Serial         uint32                   // Zone serial at time of sync
-	DistributionID string                   // For tracking confirmations
-	Nonce          string                   // Unique nonce for replay protection
-	Signature      []byte                   // Optional signature over the request
-	MessageType    string                   // "sync" (agent→agent), "update" (agent→combiner), "rfi" (RFI)
-	RfiType        string                   // For RFI messages: "SYNC", "AUDIT", "CONFIG"
-	RfiSubtype     string                   // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
-	ZoneClass      string                   // "mp" (default) or "provider"
-	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
-}
-
-// SyncResponse represents a synchronization response.
-type SyncResponse struct {
-	ResponderID    string            // Identity of the responder
-	Zone           string            // Echoed zone name
-	DistributionID string            // Echoed correlation ID
-	Status         ConfirmStatus     // Result of processing
-	Message        string            // Optional status message
-	Timestamp      time.Time         // Response timestamp
-	AppliedRecords []string          // RRs accepted by recipient (additions)
-	RemovedRecords []string          // RRs confirmed removed by recipient (deletions)
-	RejectedItems  []RejectedItemDTO // RRs rejected with reasons
-	Truncated      bool              // True if applied/removed_records was dropped for size
-}
-
 // RelocateRequest asks a peer to use a different address.
 // This is used for DDoS mitigation: after discovery via well-known
 // addresses, agents can relocate to private addresses.
@@ -229,89 +164,6 @@ type KeyInventoryEntry struct {
 	Flags     uint16 `json:"flags"`
 	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
-}
-
-// KeystateRequest carries a key lifecycle signal between agent and signer.
-// Direction: Agent→Signer (propagated, rejected, removed) or Signer→Agent (published, retired, inventory).
-// When Signal == "inventory", KeyInventory carries the complete key set for the zone.
-type KeystateRequest struct {
-	SenderID     string              // Identity of the sender
-	Zone         string              // Zone this key belongs to (FQDN)
-	KeyTag       uint16              // DNSKEY key tag (unused for inventory)
-	Algorithm    uint8               // DNSKEY algorithm number (unused for inventory)
-	Signal       string              // "propagated", "rejected", "removed", "published", "retired", "inventory"
-	Message      string              // Optional detail (e.g. rejection reason)
-	KeyInventory []KeyInventoryEntry // Complete key inventory (only when Signal == "inventory")
-	Timestamp    time.Time           // Request timestamp
-}
-
-// KeystateResponse acknowledges a KEYSTATE signal.
-type KeystateResponse struct {
-	ResponderID string    // Identity of the responder
-	Zone        string    // Echoed zone name
-	KeyTag      uint16    // Echoed key tag
-	Signal      string    // Echoed signal
-	Accepted    bool      // Whether the signal was accepted
-	Message     string    // Optional status message
-	Timestamp   time.Time // Response timestamp
-}
-
-// EditsRequest carries an agent's current contributions from the combiner back to the agent.
-// Modeled on KeystateRequest. Sent by the combiner in response to an RFI EDITS.
-type EditsRequest struct {
-	SenderID     string                         // Combiner identity
-	Zone         string                         // Zone (FQDN)
-	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
-	Message      string                         // Optional status
-	Timestamp    time.Time
-}
-
-// EditsResponse acknowledges receipt of an EDITS message.
-type EditsResponse struct {
-	ResponderID string    // Identity of the responder
-	Zone        string    // Echoed zone name
-	Accepted    bool      // Whether the message was accepted
-	Message     string    // Optional status message
-	Timestamp   time.Time // Response timestamp
-}
-
-// ConfigRequest carries config data from a peer agent back to the requester.
-// Sent by the receiving agent in response to an RFI CONFIG.
-type ConfigRequest struct {
-	SenderID   string            // Sender identity
-	Zone       string            // Zone (FQDN)
-	Subtype    string            // Config subtype: "upstream", "downstream", "sig0key"
-	ConfigData map[string]string // Key-value config data
-	Message    string            // Optional status
-	Timestamp  time.Time
-}
-
-// ConfigResponse acknowledges receipt of a CONFIG message.
-type ConfigResponse struct {
-	ResponderID string
-	Zone        string
-	Accepted    bool
-	Message     string
-	Timestamp   time.Time
-}
-
-// AuditRequest carries audit data from a peer agent back to the requester.
-// Sent by the receiving agent in response to an RFI AUDIT.
-type AuditRequest struct {
-	SenderID  string      // Sender identity
-	Zone      string      // Zone (FQDN)
-	AuditData interface{} // Zone data repo snapshot (placeholder)
-	Message   string      // Optional status
-	Timestamp time.Time
-}
-
-// AuditResponse acknowledges receipt of an AUDIT message.
-type AuditResponse struct {
-	ResponderID string
-	Zone        string
-	Accepted    bool
-	Message     string
-	Timestamp   time.Time
 }
 
 // ConfirmRequest confirms receipt and processing of a sync operation.

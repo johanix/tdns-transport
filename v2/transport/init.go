@@ -105,23 +105,23 @@ FALLBACK LOGIC
 
 For robust communication, implement transport fallback:
 
-	func (engine *HsyncEngine) sendWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
+	func (engine *HsyncEngine) sendWithFallback(ctx context.Context, peer *transport.Peer, msg *transport.AppMessage) (*transport.AppResponse, error) {
 		// Try preferred transport first
 		t := engine.selectTransport(peer)
 		if t != nil {
-			resp, err := t.Sync(ctx, peer, req)
+			resp, err := t.SendApp(ctx, peer, msg)
 			if err == nil {
 				return resp, nil
 			}
 			log.Printf("Primary transport %s failed: %v, trying fallback", t.Name(), err)
 		}
 
-		// Try alternative transport
+		// Try alternative transport (TransportManager.Send does this for you)
 		if t == engine.apiTransport && engine.dnsTransport != nil {
-			return engine.dnsTransport.Sync(ctx, peer, req)
+			return engine.dnsTransport.SendApp(ctx, peer, msg)
 		}
 		if t == engine.dnsTransport && engine.apiTransport != nil {
-			return engine.apiTransport.Sync(ctx, peer, req)
+			return engine.apiTransport.SendApp(ctx, peer, msg)
 		}
 
 		return nil, fmt.Errorf("all transports failed")

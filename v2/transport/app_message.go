@@ -200,7 +200,17 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	if err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID, err, false)
 	}
-	var app core.AgentMsgPost
+	// The sync-family payload is the application's; transport reads only
+	// the fields the API body needs, without importing the application's
+	// types (C4).
+	var app struct {
+		OriginatorID string              `json:"OriginatorID"`
+		Zone         string              `json:"Zone"`
+		Records      map[string][]string `json:"records"`
+		Operations   json.RawMessage     `json:"operations"`
+		RfiType      string              `json:"RfiType"`
+		Time         time.Time           `json:"Time"`
+	}
 	if err := json.Unmarshal(msg.Payload, &app); err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
 			fmt.Errorf("application payload is not a sync-family message: %w", err), false)
@@ -210,7 +220,7 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		OriginatorID:   app.OriginatorID,
 		YourIdentity:   peer.ID,
 		Zone:           app.Zone,
-		SyncType:       SyncType(0).String(),
+		SyncType:       "UNKNOWN",
 		Records:        app.Records,
 		Operations:     app.Operations,
 		DistributionID: msg.DistributionID,

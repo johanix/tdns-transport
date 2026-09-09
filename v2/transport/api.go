@@ -16,8 +16,6 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"github.com/johanix/tdns/v2/core"
 )
 
 // APITransport implements the Transport interface using HTTPS REST API.
@@ -353,7 +351,7 @@ type apiSyncRequest struct {
 	Zone           string              `json:"zone"`
 	SyncType       string              `json:"sync_type"`
 	Records        map[string][]string `json:"records"`
-	Operations     []core.RROperation  `json:"operations,omitempty"`
+	Operations     json.RawMessage     `json:"operations,omitempty"`
 	Serial         uint32              `json:"serial"`
 	DistributionID string              `json:"distribution_id"`
 	RfiType        string              `json:"rfi_type,omitempty"`
