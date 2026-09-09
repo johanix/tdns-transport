@@ -322,7 +322,12 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if peer.GetState() < PeerStateKnown {
 			peer.SetState(PeerStateKnown, "discovered via DNS (API usable)")
 		}
-		peer.SetMechanismTLSA("API", result.TLSA)
+		// TLSA only when discovered: a partial re-discovery must not wipe a
+		// previously pinned certificate (2026-08-25 review, finding 4;
+		// mirrors the JWK rule below).
+		if result.TLSA != nil {
+			peer.SetMechanismTLSA("API", result.TLSA)
+		}
 	} else if result.APIUri != "" {
 		// URI found but no resolved address: keep the mechanism NEEDED so
 		// the retrier revisits it; do not advertise an unusable URL; never
