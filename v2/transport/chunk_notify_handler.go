@@ -43,9 +43,6 @@ type ChunkNotifyHandler struct {
 	// Router handles message routing and middleware (optional, if nil uses legacy routing)
 	Router *DNSMessageRouter
 
-	// IncomingChan receives parsed messages for the hsyncengine
-	IncomingChan chan *IncomingMessage
-
 	// LocalID is our agent identity for filtering
 	LocalID string
 
@@ -92,7 +89,6 @@ func NewChunkNotifyHandler(controlZone, localID string, transport *DNSTransport)
 	h := &ChunkNotifyHandler{
 		ControlZone:  dns.Fqdn(controlZone),
 		Transport:    transport,
-		IncomingChan: make(chan *IncomingMessage, 100),
 		LocalID:      localID,
 	}
 

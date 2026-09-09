@@ -162,7 +162,7 @@ func HandleHello(ctx *MessageContext) error {
 
 // HandleBeat processes heartbeat messages.
 // Works for both agent and combiner — the confirm response is always constructed,
-// and the RouteToMsgHandler middleware (agent only) picks up the message for further processing.
+// and the RouteToCallback middleware hands the message to the application for further processing.
 func HandleBeat(ctx *MessageContext) error {
 	lgTransport().Debug("processing beat", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
@@ -831,42 +831,12 @@ func sendStandardResponse(w dns.ResponseWriter, req *dns.Msg, rcode int) error {
 	return w.WriteMsg(resp)
 }
 
-// RouteToMsgHandler is a middleware that routes processed messages to a handler goroutine.
-// After the handler executes, if it set "message_type" and "incoming_message" in ctx.Data,
-// the IncomingMessage is forwarded to the incomingChan for async processing.
-// Used by all roles (agent, combiner, signer).
-func RouteToMsgHandler(incomingChan chan<- *IncomingMessage) MiddlewareFunc {
-	return func(ctx *MessageContext, next MessageHandlerFunc) error {
-		// Execute handler
-		err := next(ctx)
-		if err != nil {
-			return err
-		}
-
-		// Route message to handler goroutine if handler stored it for routing
-		if msgType, ok := ctx.Data["message_type"]; ok {
-			if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
-				select {
-				case incomingChan <- incomingMsg:
-					lgTransport().Debug("routed message to handler", "type", msgType, "peer", ctx.PeerID)
-				default:
-					lgTransport().Warn("message dropped: channel full",
-						"type", msgType, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
-					return fmt.Errorf("message handler channel full")
-				}
-			}
-		}
-
-		return nil
-	}
-}
-
 // RouteToCallback creates middleware that calls a callback function
 // for each successfully processed message. The callback receives
 // the parsed IncomingMessage and can dispatch to typed channels,
 // process inline, or route however the application needs.
 //
-// This replaces RouteToMsgHandler for applications that want
+// Applications register this instead of consuming a channel; they get
 // per-type fan-out instead of a single IncomingChan.
 //
 // The callback runs in the DNS server goroutine — it must be

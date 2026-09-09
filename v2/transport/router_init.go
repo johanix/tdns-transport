@@ -25,9 +25,6 @@ type RouterConfig struct {
 	// PayloadCrypto for signature and decryption middleware
 	PayloadCrypto *PayloadCrypto
 
-	// IncomingChan for routing messages to hsyncengine
-	IncomingChan chan<- *IncomingMessage
-
 	// ResponseWriter for sending DNS responses
 	ResponseWriter dns.ResponseWriter
 
@@ -88,12 +85,6 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	// 4. Logging (for visibility)
 	router.Use(NewLoggingMiddleware(true))
 	lgTransport().Info("registered logging middleware")
-
-	// 5. Route to message handler goroutine (after processing)
-	if cfg.IncomingChan != nil {
-		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		lgTransport().Info("registered message handler routing middleware")
-	}
 
 	// Register message handlers (by message type)
 
@@ -249,7 +240,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 
 // CombinerRouterConfig holds configuration for combiner router initialization.
 // Handles 3 message types: ping, beat, update.
-// Beat, hello, and update are routed to CombinerMsgHandler via IncomingChan.
+// Beat, hello, and update reach CombinerMsgHandler through the RouteToCallback seam.
 type CombinerRouterConfig struct {
 	// Authorizer for authorization middleware (optional).
 	// If nil, authorization middleware is skipped.
@@ -271,10 +262,6 @@ type CombinerRouterConfig struct {
 	// HandleUpdate is a closure from NewCombinerSyncHandler (combiner_chunk.go).
 	// Handles "update" messages (agent→combiner zone data contributions).
 	HandleUpdate MessageHandlerFunc
-
-	// IncomingChan for routing messages to the handler goroutine.
-	// If nil, RouteToMsgHandler middleware is not registered.
-	IncomingChan chan<- *IncomingMessage
 }
 
 // InitializeCombinerRouter registers combiner-specific handlers and middleware.
@@ -318,12 +305,6 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
 	lgTransport().Info("combiner: registered logging middleware")
-
-	// 5. Route to message handler goroutine (after processing)
-	if cfg.IncomingChan != nil {
-		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		lgTransport().Info("combiner: registered message handler routing middleware")
-	}
 
 	// Register shared handlers for ping, beat, and hello (same implementation as agent)
 	if err := router.Register(
@@ -400,7 +381,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 }
 
 // SignerRouterConfig holds configuration for signer (tdns-auth) router initialization.
-// Handles ping + keystate. Beat messages are routed to SignerMsgHandler via IncomingChan.
+// Handles ping + keystate. Beat messages reach SignerMsgHandler through the RouteToCallback seam.
 type SignerRouterConfig struct {
 	// Authorizer for authorization middleware (optional).
 	// If nil, authorization middleware is skipped.
@@ -417,10 +398,6 @@ type SignerRouterConfig struct {
 
 	// AllowUnencrypted allows unencrypted payloads when crypto is enabled.
 	AllowUnencrypted bool
-
-	// IncomingChan for routing messages to the handler goroutine.
-	// If nil, RouteToMsgHandler middleware is not registered.
-	IncomingChan chan<- *IncomingMessage
 }
 
 // InitializeSignerRouter registers signer-specific handlers and middleware.
@@ -464,12 +441,6 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
 	lgTransport().Info("signer: registered logging middleware")
-
-	// 5. Route to message handler goroutine (after processing)
-	if cfg.IncomingChan != nil {
-		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		lgTransport().Info("signer: registered message handler routing middleware")
-	}
 
 	// Register ping handler (shared implementation with agent/combiner)
 	if err := router.Register(

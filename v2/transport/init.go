@@ -15,7 +15,7 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 
 	import (
 		"github.com/johanix/tdns/v2"
-		"github.com/johanix/tdns/v2/agent/transport"
+		"github.com/johanix/tdns-transport/v2/transport"
 		"github.com/johanix/tdns/v2/core"
 	)
 
@@ -27,8 +27,15 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 			Timeout:     5 * time.Second,
 		})
 
-		// Create CHUNK NOTIFY handler
+		// Create CHUNK NOTIFY handler and its router. The router runs the
+		// middleware chain (authorization, crypto, stats) and the per-verb
+		// handlers registered by InitializeRouter.
 		chunkHandler := transport.NewChunkNotifyHandler(controlZone, localID, dnsTransport)
+		router := transport.NewDNSMessageRouter()
+		if err := transport.InitializeRouter(router, &transport.RouterConfig{PeerRegistry: peerRegistry}); err != nil {
+			panic(err)
+		}
+		chunkHandler.Router = router
 
 		// Register the handler with tdns
 		// This creates an adapter from the generic handler to tdns.NotifyHandlerFunc
@@ -36,13 +43,11 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 			return chunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
 		})
 
-		// Start a goroutine to process incoming messages and route to hsyncengine
-		go func() {
-			for msg := range chunkHandler.IncomingChan {
-				// Route to hsyncengine based on message type
-				processIncomingDNSMessage(msg)
-			}
-		}()
+		// Hand every successfully handled message to the application. The
+		// callback runs in the DNS server goroutine, so it must not block
+		// (push to a buffered channel and return). There is no channel to
+		// consume: RouteToCallback replaced the old IncomingChan.
+		router.Use(transport.RouteToCallback(processIncomingDNSMessage))
 
 		return dnsTransport, chunkHandler
 	}
