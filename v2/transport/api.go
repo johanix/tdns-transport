@@ -171,58 +171,6 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}, nil
 }
 
-// Sync sends a data synchronization request to a peer via HTTPS API.
-func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (*SyncResponse, error) {
-	url, err := apiURL(peer, "/sync")
-	if err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID, err, false)
-	}
-
-	// Use req.MessageType if set (e.g. "rfi"), default to "sync"
-	msgType := req.MessageType
-	if msgType == "" {
-		msgType = "sync"
-	}
-
-	apiReq := &apiSyncRequest{
-		MessageType:    msgType,
-		OriginatorID:   req.SenderID,
-		YourIdentity:   peer.ID,
-		Zone:           req.Zone,
-		SyncType:       req.SyncType.String(),
-		Records:        req.Records,
-		Operations:     req.Operations,
-		Serial:         req.Serial,
-		DistributionID: req.DistributionID,
-		RfiType:        req.RfiType,
-		Timestamp:      req.Timestamp.Unix(),
-	}
-	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
-	if err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID, err, true)
-	}
-
-	var apiResp apiSyncResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID,
-			fmt.Errorf("failed to unmarshal response: %w", err), false)
-	}
-
-	status := ConfirmSuccess
-	if apiResp.Error {
-		status = ConfirmFailed
-	}
-
-	return &SyncResponse{
-		ResponderID:    apiResp.Identity,
-		Zone:           req.Zone,
-		DistributionID: req.DistributionID,
-		Status:         status,
-		Message:        apiResp.Msg,
-		Timestamp:      time.Now(),
-	}, nil
-}
-
 // Relocate requests a peer to use a different address via HTTPS API.
 func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error) {
 	url, err := apiURL(peer, "/relocate")

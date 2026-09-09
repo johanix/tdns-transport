@@ -88,7 +88,11 @@ type Transport interface {
 
 	// Sync sends or responds to a data synchronization request.
 	// All sync operations are zone-specific.
-	Sync(ctx context.Context, peer *Peer, req *SyncRequest) (*SyncResponse, error)
+	// SendApp carries one opaque application message (C2). Application
+	// verbs (sync/update/rfi, keystate, edits, config, audit,
+	// status-update, ...) all travel through it; the typed per-verb
+	// send methods are gone.
+	SendApp(ctx context.Context, peer *Peer, msg *AppMessage) (*AppResponse, error)
 
 	// Relocate requests the peer to use a different address for future communication.
 	// Used for DDoS mitigation after discovery is complete.

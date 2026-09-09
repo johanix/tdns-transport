@@ -300,7 +300,7 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // chosen by SelectTransport, falling back to the alternative on
 // error. The message type is determined by the concrete type of req:
 //
-//   - *SyncRequest    → Transport.Sync
+//   - *AppMessage     → Transport.SendApp (all application verbs; C2)
 //   - *PingRequest    → Transport.Ping
 //   - *RelocateRequest → Transport.Relocate
 //
@@ -311,7 +311,7 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // in. Wrapping them under a generic Send would change semantics.
 // Phase 5 of the main refactor will address that separately.)
 //
-// Returns the response (one of *SyncResponse, *PingResponse,
+// Returns the response (one of *AppResponse, *PingResponse,
 // *RelocateResponse) or an error if both transports failed or the
 // message type is unsupported.
 //
@@ -328,8 +328,20 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 			return nil, fmt.Errorf("no transport selected")
 		}
 		switch r := req.(type) {
-		case *SyncRequest:
-			return t.Sync(ctx, peer, r)
+		case *AppMessage:
+			resp, err := t.SendApp(ctx, peer, r)
+			if err != nil {
+				return nil, err
+			}
+			// A non-ok confirmation of a zone-data verb is an
+			// application-level rejection; report it as a retryable
+			// error so the caller's queue retries (the pre-C2
+			// DNSTransport.Sync contract).
+			if resp.Status == ConfirmFailed && IsSyncFamily(r.TypeToken) {
+				return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID,
+					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
+			}
+			return resp, nil
 		case *PingRequest:
 			return t.Ping(ctx, peer, r)
 		case *RelocateRequest:
