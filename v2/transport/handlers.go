@@ -371,10 +371,11 @@ func HandleKeystate(ctx *MessageContext) error {
 	// Store for processing by the recipient (signer or agent)
 	ctx.Data["message_type"] = "keystate"
 	ctx.Data["incoming_message"] = &IncomingMessage{
-		Type:     "keystate",
-		SenderID: keystate.GetSenderID(),
-		Zone:     keystate.Zone,
-		Payload:  ctx.ChunkPayload,
+		Type:      "keystate",
+		TypeToken: "keystate",
+		SenderID:  keystate.GetSenderID(),
+		Zone:      keystate.Zone,
+		Payload:   ctx.ChunkPayload,
 	}
 
 	// Create confirmation response using standard "confirm" type so sendNotifyWithPayload
@@ -438,10 +439,11 @@ func HandleEdits(ctx *MessageContext) error {
 	// Store for processing by the agent
 	ctx.Data["message_type"] = "edits"
 	ctx.Data["incoming_message"] = &IncomingMessage{
-		Type:     "edits",
-		SenderID: edits.GetSenderID(),
-		Zone:     edits.Zone,
-		Payload:  ctx.ChunkPayload,
+		Type:      "edits",
+		TypeToken: "edits",
+		SenderID:  edits.GetSenderID(),
+		Zone:      edits.Zone,
+		Payload:   ctx.ChunkPayload,
 	}
 
 	// Create confirmation response using standard "confirm" type
@@ -494,10 +496,11 @@ func HandleConfig(ctx *MessageContext) error {
 
 	ctx.Data["message_type"] = "config"
 	ctx.Data["incoming_message"] = &IncomingMessage{
-		Type:     "config",
-		SenderID: config.GetSenderID(),
-		Zone:     config.Zone,
-		Payload:  ctx.ChunkPayload,
+		Type:      "config",
+		TypeToken: "config",
+		SenderID:  config.GetSenderID(),
+		Zone:      config.Zone,
+		Payload:   ctx.ChunkPayload,
 	}
 
 	confirmPayload := struct {
@@ -549,10 +552,11 @@ func HandleAudit(ctx *MessageContext) error {
 
 	ctx.Data["message_type"] = "audit"
 	ctx.Data["incoming_message"] = &IncomingMessage{
-		Type:     "audit",
-		SenderID: audit.GetSenderID(),
-		Zone:     audit.Zone,
-		Payload:  ctx.ChunkPayload,
+		Type:      "audit",
+		TypeToken: "audit",
+		SenderID:  audit.GetSenderID(),
+		Zone:      audit.Zone,
+		Payload:   ctx.ChunkPayload,
 	}
 
 	confirmPayload := struct {
@@ -605,10 +609,11 @@ func HandleStatusUpdate(ctx *MessageContext) error {
 
 	ctx.Data["message_type"] = "status-update"
 	ctx.Data["incoming_message"] = &IncomingMessage{
-		Type:     "status-update",
-		SenderID: statusUpdate.GetSenderID(),
-		Zone:     statusUpdate.Zone,
-		Payload:  ctx.ChunkPayload,
+		Type:      "status-update",
+		TypeToken: "status-update",
+		SenderID:  statusUpdate.GetSenderID(),
+		Zone:      statusUpdate.Zone,
+		Payload:   ctx.ChunkPayload,
 	}
 
 	confirmPayload := struct {
@@ -693,10 +698,11 @@ func parseIncomingMessage(payload []byte) *IncomingMessage {
 		zone = fields.LegacyZone
 	}
 	return &IncomingMessage{
-		Type:     msgType,
-		SenderID: senderID,
-		Zone:     zone,
-		Payload:  payload,
+		Type:      msgType,
+		TypeToken: msgType,
+		SenderID:  senderID,
+		Zone:      zone,
+		Payload:   payload,
 	}
 }
 

@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns-transport/v2/distrib"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -87,9 +87,9 @@ type ChunkNotifyHandler struct {
 // NewChunkNotifyHandler creates a new ChunkNotifyHandler.
 func NewChunkNotifyHandler(controlZone, localID string, transport *DNSTransport) *ChunkNotifyHandler {
 	h := &ChunkNotifyHandler{
-		ControlZone:  dns.Fqdn(controlZone),
-		Transport:    transport,
-		LocalID:      localID,
+		ControlZone: dns.Fqdn(controlZone),
+		Transport:   transport,
+		LocalID:     localID,
 	}
 
 	// Inherit secure wrapper from transport if available
@@ -299,6 +299,7 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 
 	return &IncomingMessage{
 		Type:           msgType,
+		TypeToken:      msgType,
 		DistributionID: distributionID,
 		SenderID:       senderID,
 		Zone:           zone,
