@@ -82,7 +82,6 @@ type Peer struct {
 	Capabilities []string // What the peer supports
 
 	// Shared zones
-	SharedZones map[string]*ZoneRelation // Zones we share with this peer
 
 	// Communication state (single-state legacy fields, kept in sync with
 	// Mechanisms via dual-write — see Bite 1 in
@@ -185,23 +184,12 @@ type MessageStats struct {
 	TotalReceived uint64
 }
 
-// ZoneRelation tracks the relationship for a specific zone.
-type ZoneRelation struct {
-	Zone        string    // Zone name (FQDN)
-	Role        string    // Our role: "primary", "secondary", "multi-signer"
-	PeerRole    string    // Peer's role for this zone
-	LastSync    time.Time // Last successful sync for this zone
-	SyncSerial  uint32    // Last synced serial
-	SyncPending bool      // Whether a sync is pending
-}
-
 // NewPeer creates a new Peer with the given ID.
 func NewPeer(id string) *Peer {
 	return &Peer{
 		ID:           id,
 		State:        PeerStateNeeded,
 		StateChanged: time.Now(),
-		SharedZones:  make(map[string]*ZoneRelation),
 		Mechanisms: map[string]*MechanismState{
 			"API": {State: PeerStateNeeded, StateChanged: time.Now()},
 			"DNS": {State: PeerStateNeeded, StateChanged: time.Now()},
@@ -715,50 +703,6 @@ func (p *Peer) SetOperationalAddress(addr *Address) {
 	p.OperationalAddr = addr
 }
 
-// AddSharedZone adds a zone that we share with this peer.
-func (p *Peer) AddSharedZone(zone, ourRole, peerRole string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.SharedZones[zone] = &ZoneRelation{
-		Zone:     zone,
-		Role:     ourRole,
-		PeerRole: peerRole,
-	}
-}
-
-// ReplaceSharedZones atomically replaces the peer's shared-zone set under the
-// peer lock. Callers must not hold a registry/peer-metadata mutex across this
-// call (lock order: registry -> peer-metadata -> transport.Peer).
-func (p *Peer) ReplaceSharedZones(zones []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.SharedZones = make(map[string]*ZoneRelation, len(zones))
-	for _, zone := range zones {
-		p.SharedZones[zone] = &ZoneRelation{Zone: zone}
-	}
-}
-
-// GetSharedZone returns the zone relation for a specific zone.
-func (p *Peer) GetSharedZone(zone string) *ZoneRelation {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.SharedZones[zone]
-}
-
-// GetSharedZones returns all shared zone names.
-func (p *Peer) GetSharedZones() []string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	zones := make([]string, 0, len(p.SharedZones))
-	for zone := range p.SharedZones {
-		zones = append(zones, zone)
-	}
-	return zones
-}
-
 // RecordBeatSent records that a beat was sent.
 func (p *Peer) RecordBeatSent() {
 	p.mu.Lock()
@@ -888,20 +832,6 @@ func (r *PeerRegistry) ByState(state PeerState) []*Peer {
 	var peers []*Peer
 	for _, peer := range r.peers {
 		if peer.GetState() == state {
-			peers = append(peers, peer)
-		}
-	}
-	return peers
-}
-
-// ByZone returns all peers that share a given zone.
-func (r *PeerRegistry) ByZone(zone string) []*Peer {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	var peers []*Peer
-	for _, peer := range r.peers {
-		if peer.GetSharedZone(zone) != nil {
 			peers = append(peers, peer)
 		}
 	}

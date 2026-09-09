@@ -277,7 +277,9 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 
 	// Create beat payload using typed struct from core package
 	// Get shared zones from peer
-	sharedZones := peer.GetSharedZones()
+	// Shared zones come from the application (C7): transport keeps no zone
+	// knowledge on the peer.
+	sharedZones := req.Zones
 
 	if len(sharedZones) == 0 {
 		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)

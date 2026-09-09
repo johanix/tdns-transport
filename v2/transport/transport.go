@@ -104,6 +104,7 @@ type BeatRequest struct {
 	Timestamp time.Time       // Current timestamp
 	Sequence  uint64          // Monotonic sequence number
 	State     string          // Sender's current state
+	Zones     []string        // Zones the sender believes it shares with the peer (application-derived; C7)
 	Gossip    json.RawMessage `json:"gossip,omitempty"` // Gossip data piggybacked on beats
 }
 
