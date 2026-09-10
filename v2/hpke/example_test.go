@@ -23,9 +23,6 @@ func ExampleGenerateKeyPair() {
 
 	fmt.Printf("Public key: %s\n", hex.EncodeToString(pubKey))
 	fmt.Printf("Private key: %s\n", hex.EncodeToString(privKey))
-	// Output:
-	// Public key: [32 hex bytes]
-	// Private key: [32 hex bytes]
 }
 
 func ExampleEncrypt() {
@@ -54,11 +51,6 @@ func ExampleEncrypt() {
 
 	fmt.Printf("Decrypted: %s\n", string(decrypted))
 	fmt.Printf("Match: %v\n", string(decrypted) == string(plaintext))
-	// Output:
-	// Encrypted [N] bytes to [M] bytes
-	// Ephemeral public key: [32 hex bytes]
-	// Decrypted: This is a simulated DNSSEC private key
-	// Match: true
 }
 
 func ExampleGenerateDistributionID() {
@@ -79,9 +71,6 @@ func ExampleGenerateDistributionID() {
 	}
 
 	fmt.Printf("Valid distribution ID\n")
-	// Output:
-	// Distribution ID: [32 hex characters]
-	// Valid distribution ID
 }
 
 func ExampleEncrypt_encryptDNSSECKey() {
@@ -106,10 +95,4 @@ MC4CAQAwBQYDK2VwBCIEIExampleKeyMaterialHere1234567890ABCDEF
 	// Edge node decrypts
 	decrypted, _ := Decrypt(recipientPriv, ephemeralPub, ciphertext)
 	fmt.Printf("Decrypted key matches: %v\n", string(decrypted) == string(plaintext))
-	// Output:
-	// Encrypted key package:
-	//   Size: [N] bytes
-	//   Base64: [base64 string]...
-	//   Ephemeral pub: [32 hex bytes]
-	// Decrypted key matches: true
 }

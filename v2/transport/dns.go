@@ -277,7 +277,9 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 
 	// Create beat payload using typed struct from core package
 	// Get shared zones from peer
-	sharedZones := peer.GetSharedZones()
+	// Shared zones come from the application (C7): transport keeps no zone
+	// knowledge on the peer.
+	sharedZones := req.Zones
 
 	if len(sharedZones) == 0 {
 		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)
@@ -313,6 +315,10 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		}, nil
 	}
 
+	if resp.Status == ConfirmSuccess {
+		peer.RecordMechanismBeatSent("DNS")
+	}
+
 	return &BeatResponse{
 		ResponderID: peer.ID,
 		Timestamp:   time.Now(),
@@ -320,123 +326,6 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		State:       resp.Message,
 		Ack:         resp.Status == ConfirmSuccess,
 		Gossip:      resp.Gossip,
-	}, nil
-}
-
-// Sync sends a data synchronization request to a peer via DNS.
-// This is the primary DNS mode operation using NOTIFY(CHUNK) + Query.
-func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (*SyncResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Sync", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := req.DistributionID
-	if distributionID == "" {
-		distributionID = GenerateDistributionID()
-	}
-	qname := t.buildNotifyQNAME(distributionID)
-
-	// Create payload using typed struct from core package
-	messageType := core.AgentMsg(req.MessageType)
-	if messageType == "" {
-		messageType = core.AgentMsgNotify // default to sync
-	}
-	payload := &core.AgentMsgPost{
-		MessageType:  messageType,
-		OriginatorID: req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         req.Zone,
-		Records:      req.Records,
-		Operations:   req.Operations,
-		Time:         req.Timestamp,
-		RfiType:      req.RfiType,
-		RfiSubtype:   req.RfiSubtype,
-		Nonce:        req.Nonce,
-		ZoneClass:    req.ZoneClass,
-		Publish:      req.Publish,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Sync", peer.ID,
-			fmt.Errorf("failed to marshal payload: %w", err), false)
-	}
-
-	// Create and send NOTIFY(CHUNK) — opType reflects actual message type (sync, update, rfi)
-	opType := req.MessageType
-	if opType == "" {
-		opType = "sync"
-	}
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, opType, distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	syncResp := &SyncResponse{
-		ResponderID:    peer.ID,
-		Zone:           req.Zone,
-		DistributionID: distributionID,
-		Status:         resp.Status,
-		Message:        resp.Message,
-		Timestamp:      time.Now(),
-		AppliedRecords: resp.AppliedRecords,
-		RemovedRecords: resp.RemovedRecords,
-		RejectedItems:  resp.RejectedItems,
-		Truncated:      resp.Truncated,
-	}
-
-	// A non-ok confirmation is an application-level rejection — return as error
-	// so the queue knows to retry.
-	if resp.Status == ConfirmFailed {
-		return syncResp, NewTransportError("DNS", "Sync", peer.ID,
-			fmt.Errorf("recipient rejected sync: %s", resp.Message), true)
-	}
-
-	return syncResp, nil
-}
-
-// Relocate requests a peer to use a different address via DNS.
-func (t *DNSTransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Relocate", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	// Create relocate payload
-	payload := &DnsRelocatePayload{
-		Type:     "relocate",
-		SenderID: req.SenderID,
-		NewAddress: DnsAddress{
-			Host:      req.NewAddress.Host,
-			Port:      req.NewAddress.Port,
-			Transport: req.NewAddress.Transport,
-			Path:      req.NewAddress.Path,
-		},
-		Reason:     req.Reason,
-		ValidUntil: req.ValidUntil.Unix(),
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Relocate", peer.ID,
-			fmt.Errorf("failed to marshal relocate payload: %w", err), false)
-	}
-
-	// Create and send NOTIFY(CHUNK)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "relocate", distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	return &RelocateResponse{
-		ResponderID: peer.ID,
-		Accepted:    resp.Status == ConfirmSuccess,
-		Message:     resp.Message,
-		Timestamp:   time.Now(),
 	}, nil
 }
 
@@ -573,11 +462,11 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
 			}
 			// Validate format byte before processing
-			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+			if chunkOpt.Format != EnvelopeNone && chunkOpt.Format != EnvelopeJOSE {
 				return nil, fmt.Errorf("unknown CHUNK format in ping confirm: %d", chunkOpt.Format)
 			}
 			data := chunkOpt.Data
-			if chunkOpt.Format == core.FormatJWT && sw != nil {
+			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
 				if err != nil {
 					return nil, fmt.Errorf("decryption of ping confirm failed: %w", err)
@@ -596,229 +485,6 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 		}
 	}
 	return nil, fmt.Errorf("no CHUNK option in response")
-}
-
-// Keystate sends a key lifecycle signal to a peer via DNS NOTIFY(CHUNK).
-// Used for agent↔signer DNSKEY propagation signaling.
-func (t *DNSTransport) Keystate(ctx context.Context, peer *Peer, req *KeystateRequest) (*KeystateResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Keystate", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	// Convert KeyInventory from transport to core type
-	var coreInventory []core.KeyInventoryEntry
-	for _, e := range req.KeyInventory {
-		coreInventory = append(coreInventory, core.KeyInventoryEntry{
-			KeyTag:    e.KeyTag,
-			Algorithm: e.Algorithm,
-			Flags:     e.Flags,
-			State:     e.State,
-			KeyRR:     e.KeyRR,
-		})
-	}
-
-	// Create keystate payload using typed struct from core package
-	payload := &core.AgentKeystatePost{
-		MessageType:  core.AgentMsgKeystate,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         req.Zone,
-		KeyTag:       req.KeyTag,
-		Algorithm:    req.Algorithm,
-		Signal:       req.Signal,
-		Message:      req.Message,
-		KeyInventory: coreInventory,
-		Time:         req.Timestamp,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Keystate", peer.ID,
-			fmt.Errorf("failed to marshal keystate payload: %w", err), false)
-	}
-
-	// Send via sendNotifyWithPayload (reuses standard NOTIFY+confirm flow)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "keystate", distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	return &KeystateResponse{
-		ResponderID: peer.ID,
-		Zone:        req.Zone,
-		KeyTag:      req.KeyTag,
-		Signal:      req.Signal,
-		Accepted:    resp.Status == ConfirmSuccess,
-		Message:     resp.Message,
-		Timestamp:   time.Now(),
-	}, nil
-}
-
-// extractKeystateConfirmFromResponse extracts DnsKeystateConfirmPayload from response EDNS0 CHUNK.
-func extractKeystateConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWrapper) (*DnsKeystateConfirmPayload, error) {
-	opt := res.IsEdns0()
-	if opt == nil {
-		return nil, fmt.Errorf("no EDNS0 in response")
-	}
-	for _, o := range opt.Option {
-		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
-			chunkOpt, err := edns0.ParseChunkOption(local)
-			if err != nil {
-				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
-			}
-			// Validate format byte before processing
-			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
-				return nil, fmt.Errorf("unknown CHUNK format in keystate confirm: %d", chunkOpt.Format)
-			}
-			data := chunkOpt.Data
-			if chunkOpt.Format == core.FormatJWT && sw != nil {
-				decrypted, err := sw.UnwrapIncoming(peerID, data)
-				if err != nil {
-					return nil, fmt.Errorf("decryption of keystate confirm failed: %w", err)
-				}
-				data = decrypted
-			}
-			var confirm DnsKeystateConfirmPayload
-			if err := json.Unmarshal(data, &confirm); err != nil {
-				return nil, err
-			}
-			if confirm.Type != "keystate_confirm" && confirm.Type != "confirm" {
-				return nil, fmt.Errorf("expected keystate_confirm or confirm, got %s", confirm.Type)
-			}
-			return &confirm, nil
-		}
-	}
-	return nil, fmt.Errorf("no CHUNK option in response")
-}
-
-// Edits sends an EDITS message to an agent, carrying that agent's current contributions.
-// Modeled on DNSTransport.Keystate(). Sent by combiner in response to RFI EDITS.
-func (t *DNSTransport) Edits(ctx context.Context, peer *Peer, req *EditsRequest) (*EditsResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Edits", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	// Create edits payload using typed struct from core package
-	payload := &core.AgentEditsPost{
-		MessageType:  core.AgentMsgEdits,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         req.Zone,
-		AgentRecords: req.AgentRecords,
-		Message:      req.Message,
-		Time:         req.Timestamp,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Edits", peer.ID,
-			fmt.Errorf("failed to marshal edits payload: %w", err), false)
-	}
-
-	// Send via sendNotifyWithPayload (reuses standard NOTIFY+confirm flow)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "edits", distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	return &EditsResponse{
-		ResponderID: peer.ID,
-		Zone:        req.Zone,
-		Accepted:    resp.Status == ConfirmSuccess,
-		Message:     resp.Message,
-		Timestamp:   time.Now(),
-	}, nil
-}
-
-// Config sends a CONFIG response message to a peer agent, carrying config data.
-// Sent by the receiving agent in response to an RFI CONFIG request.
-func (t *DNSTransport) Config(ctx context.Context, peer *Peer, req *ConfigRequest) (*ConfigResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Config", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	payload := &core.AgentConfigPost{
-		MessageType:  core.AgentMsgConfig,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         req.Zone,
-		Subtype:      req.Subtype,
-		ConfigData:   req.ConfigData,
-		Message:      req.Message,
-		Time:         req.Timestamp,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Config", peer.ID,
-			fmt.Errorf("failed to marshal config payload: %w", err), false)
-	}
-
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "config", distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ConfigResponse{
-		ResponderID: peer.ID,
-		Zone:        req.Zone,
-		Accepted:    resp.Status == ConfirmSuccess,
-		Message:     resp.Message,
-		Timestamp:   time.Now(),
-	}, nil
-}
-
-// Audit sends an AUDIT response message to a peer agent, carrying audit data.
-// Sent by the receiving agent in response to an RFI AUDIT request.
-func (t *DNSTransport) Audit(ctx context.Context, peer *Peer, req *AuditRequest) (*AuditResponse, error) {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return nil, NewTransportError("DNS", "Audit", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	payload := &core.AgentAuditPost{
-		MessageType:  core.AgentMsgAudit,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         req.Zone,
-		AuditData:    req.AuditData,
-		Message:      req.Message,
-		Time:         req.Timestamp,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, NewTransportError("DNS", "Audit", peer.ID,
-			fmt.Errorf("failed to marshal audit payload: %w", err), false)
-	}
-
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "audit", distributionID, payloadJSON, false)
-	if err != nil {
-		return nil, err
-	}
-
-	return &AuditResponse{
-		ResponderID: peer.ID,
-		Zone:        req.Zone,
-		Accepted:    resp.Status == ConfirmSuccess,
-		Message:     resp.Message,
-		Timestamp:   time.Now(),
-	}, nil
 }
 
 // Confirm sends an acknowledgment of a sync operation via DNS.
@@ -898,67 +564,6 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	}
 
 	peer.Stats.RecordMessageSent("confirm")
-	return nil
-}
-
-// SendStatusUpdate sends a fire-and-forget STATUS-UPDATE NOTIFY(CHUNK) to a peer.
-// Used by both the combiner (delegation change notifications to agents) and
-// the leader agent (parentsync-done notifications to peer agents).
-func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *core.StatusUpdatePost) error {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return NewTransportError("DNS", "SendStatusUpdate", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	post.MessageType = core.AgentMsgStatusUpdate
-	post.MyIdentity = t.LocalID
-	post.YourIdentity = peer.ID
-
-	payloadJSON, err := json.Marshal(post)
-	if err != nil {
-		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
-			fmt.Errorf("failed to marshal status-update payload: %w", err), false)
-	}
-
-	finalPayload := payloadJSON
-	var payloadFormat uint8 = core.FormatJSON
-	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
-		if err != nil {
-			return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
-				fmt.Errorf("encryption required but failed: %w", err), false)
-		}
-		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
-	}
-
-	distributionID := GenerateDistributionID()
-	qname := t.buildNotifyQNAME(distributionID)
-
-	m := new(dns.Msg)
-	m.SetNotify(qname)
-	m.Question = []dns.Question{
-		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
-	}
-
-	m.SetEdns0(4096, true)
-	opt := m.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
-	}
-
-	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
-	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
-	if err != nil {
-		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
-			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
-	}
-	if res.Rcode != dns.RcodeSuccess {
-		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
-			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
-	}
-
-	peer.Stats.RecordMessageSent("status-update")
 	return nil
 }
 
@@ -1129,12 +734,12 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 				continue
 			}
 			// Validate format byte before processing
-			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+			if chunkOpt.Format != EnvelopeNone && chunkOpt.Format != EnvelopeJOSE {
 				lgTransport().Warn("unknown CHUNK format in confirm response, skipping", "format", chunkOpt.Format)
 				continue
 			}
 			data := chunkOpt.Data
-			if chunkOpt.Format == core.FormatJWT && sw != nil {
+			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
 				if err != nil {
 					continue
@@ -1261,46 +866,6 @@ func (d *DnsBeatPayload) GetSenderID() string {
 	return d.SenderID // Old format
 }
 
-// DnsSyncPayload represents a sync message payload.
-type DnsSyncPayload struct {
-	MessageType    string                   `json:"MessageType"`
-	OriginatorID   string                   `json:"OriginatorID"`
-	YourIdentity   string                   `json:"YourIdentity"`
-	Zone           string                   `json:"Zone"`
-	Nonce          string                   `json:"nonce,omitempty"`      // Nonce for replay protection (echoed in confirmation)
-	Records        map[string][]string      `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
-	Operations     []core.RROperation       `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
-	Time           string                   `json:"Time"`                 // RFC3339 timestamp
-	RfiType        string                   `json:"RfiType"`
-	RfiSubtype     string                   `json:"rfi_subtype,omitempty"`
-	Timestamp      int64                    `json:"timestamp"` // Unix timestamp (legacy compat)
-	DistributionID string                   `json:"distribution_id"`
-	ZoneClass      string                   `json:"zone_class,omitempty"`
-	Publish        *core.PublishInstruction `json:"publish,omitempty"`
-}
-
-// GetPublish returns the publish instruction (may be nil).
-func (d *DnsSyncPayload) GetPublish() *core.PublishInstruction {
-	return d.Publish
-}
-
-// DnsAddress represents an address in DNS payloads.
-type DnsAddress struct {
-	Host      string `json:"host"`
-	Port      uint16 `json:"port"`
-	Transport string `json:"transport"`
-	Path      string `json:"path,omitempty"`
-}
-
-// DnsRelocatePayload represents a relocate message payload.
-type DnsRelocatePayload struct {
-	Type       string     `json:"type"`
-	SenderID   string     `json:"sender_id"`
-	NewAddress DnsAddress `json:"new_address"`
-	Reason     string     `json:"reason"`
-	ValidUntil int64      `json:"valid_until"`
-}
-
 // RejectedItemDTO describes an RR that was rejected by the combiner and why.
 type RejectedItemDTO struct {
 	Record string `json:"record"`
@@ -1328,21 +893,6 @@ type DnsConfirmPayload struct {
 	Timestamp      int64             `json:"timestamp"`
 }
 
-// GetSenderID returns the sender ID.
-func (d *DnsSyncPayload) GetSenderID() string {
-	return d.OriginatorID
-}
-
-// GetRecords returns records grouped by owner name.
-func (d *DnsSyncPayload) GetRecords() map[string][]string {
-	return d.Records
-}
-
-// GetOperations returns explicit operations (takes precedence over Records).
-func (d *DnsSyncPayload) GetOperations() []core.RROperation {
-	return d.Operations
-}
-
 // DnsPingPayload represents a ping (liveness) message payload.
 // Parses both standard (MessageType/MyIdentity) and legacy (type/sender_id) fields.
 type DnsPingPayload struct {
@@ -1365,148 +915,6 @@ func (d *DnsPingPayload) GetSenderID() string {
 		return d.MyIdentity // New format
 	}
 	return d.SenderID // Old format
-}
-
-// DnsKeystatePayload represents a KEYSTATE message payload.
-// Used for agent↔signer key lifecycle signaling.
-type DnsKeystatePayload struct {
-	// Standard fields
-	MessageType  string `json:"MessageType"`  // "keystate"
-	MyIdentity   string `json:"MyIdentity"`   // Sender identity
-	YourIdentity string `json:"YourIdentity"` // Recipient identity
-
-	// KEYSTATE-specific fields
-	Zone         string              `json:"Zone"`                   // Zone this key belongs to (FQDN)
-	KeyTag       uint16              `json:"KeyTag"`                 // DNSKEY key tag (unused for inventory)
-	Algorithm    uint8               `json:"Algorithm"`              // DNSKEY algorithm number (unused for inventory)
-	Signal       string              `json:"Signal"`                 // "propagated", "rejected", "removed", "published", "retired", "inventory"
-	Message      string              `json:"Message,omitempty"`      // Optional detail (e.g. rejection reason)
-	KeyInventory []KeyInventoryEntry `json:"KeyInventory,omitempty"` // Complete key inventory (only when Signal == "inventory")
-	Timestamp    int64               `json:"timestamp"`              // Unix timestamp
-
-	// Legacy fields (fallback)
-	Type     string `json:"type"`      // "keystate"
-	SenderID string `json:"sender_id"` // Sender identity (legacy)
-}
-
-// GetSenderID returns the sender ID from either standard or legacy format.
-func (d *DnsKeystatePayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity
-	}
-	return d.SenderID
-}
-
-// DnsKeystateConfirmPayload is the response to a KEYSTATE message.
-type DnsKeystateConfirmPayload struct {
-	Type      string `json:"type"`              // "keystate_confirm"
-	SenderID  string `json:"sender_id"`         // Responder identity
-	Zone      string `json:"zone"`              // Echoed zone
-	KeyTag    uint16 `json:"key_tag"`           // Echoed key tag
-	Signal    string `json:"signal"`            // Echoed signal
-	Status    string `json:"status"`            // "ok" or "error"
-	Message   string `json:"message,omitempty"` // Optional detail
-	Timestamp int64  `json:"timestamp"`
-}
-
-// DnsEditsPayload represents an EDITS message payload.
-// Carries an agent's current contributions from combiner back to the agent.
-// Modeled on DnsKeystatePayload.
-type DnsEditsPayload struct {
-	// Standard fields
-	MessageType  string `json:"MessageType"`  // "edits"
-	MyIdentity   string `json:"MyIdentity"`   // Sender (combiner) identity
-	YourIdentity string `json:"YourIdentity"` // Recipient (agent) identity
-
-	// EDITS-specific fields
-	Zone         string                         `json:"Zone"`                   // Zone (FQDN)
-	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
-	Message      string                         `json:"Message,omitempty"`      // Optional status message
-
-	Timestamp int64 `json:"timestamp"` // Unix timestamp
-
-	// Legacy fields (fallback)
-	Type     string `json:"type"`      // "edits"
-	SenderID string `json:"sender_id"` // Sender identity (legacy)
-}
-
-// GetSenderID returns the sender ID from either standard or legacy format.
-func (d *DnsEditsPayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity
-	}
-	return d.SenderID
-}
-
-// DnsConfigPayload represents a CONFIG response message payload.
-// Carries config data from a peer agent back to the requester.
-type DnsConfigPayload struct {
-	MessageType  string            `json:"MessageType"`
-	MyIdentity   string            `json:"MyIdentity"`
-	YourIdentity string            `json:"YourIdentity"`
-	Zone         string            `json:"Zone"`
-	Subtype      string            `json:"Subtype"`
-	ConfigData   map[string]string `json:"ConfigData,omitempty"`
-	Message      string            `json:"Message,omitempty"`
-	Timestamp    int64             `json:"timestamp"`
-	Type         string            `json:"type"`
-	SenderID     string            `json:"sender_id"`
-}
-
-// GetSenderID returns the sender ID from either standard or legacy format.
-func (d *DnsConfigPayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity
-	}
-	return d.SenderID
-}
-
-// DnsAuditPayload represents an AUDIT response message payload.
-// Carries audit data from a peer agent back to the requester.
-type DnsAuditPayload struct {
-	MessageType  string      `json:"MessageType"`
-	MyIdentity   string      `json:"MyIdentity"`
-	YourIdentity string      `json:"YourIdentity"`
-	Zone         string      `json:"Zone"`
-	AuditData    interface{} `json:"AuditData,omitempty"`
-	Message      string      `json:"Message,omitempty"`
-	Timestamp    int64       `json:"timestamp"`
-	Type         string      `json:"type"`
-	SenderID     string      `json:"sender_id"`
-}
-
-// GetSenderID returns the sender ID from either standard or legacy format.
-func (d *DnsAuditPayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity
-	}
-	return d.SenderID
-}
-
-// DnsStatusUpdatePayload represents a STATUS-UPDATE message payload.
-// Used for combiner→agent notifications (delegation changes) and
-// agent→agent notifications (parent sync completed).
-type DnsStatusUpdatePayload struct {
-	MessageType  string   `json:"MessageType"`
-	MyIdentity   string   `json:"MyIdentity"`
-	YourIdentity string   `json:"YourIdentity"`
-	Zone         string   `json:"Zone"`
-	SubType      string   `json:"SubType"`
-	NSRecords    []string `json:"NSRecords,omitempty"`
-	DSRecords    []string `json:"DSRecords,omitempty"`
-	Result       string   `json:"Result,omitempty"`
-	Msg          string   `json:"Msg,omitempty"`
-	Timestamp    int64    `json:"timestamp"`
-	Type         string   `json:"type"`
-	SenderID     string   `json:"sender_id"`
-}
-
-// GetSenderID returns the sender ID from either standard or legacy format.
-func (d *DnsStatusUpdatePayload) GetSenderID() string {
-	if d.MyIdentity != "" {
-		return d.MyIdentity
-	}
-	return d.SenderID
 }
 
 // DnsPingConfirmPayload is the response to a ping; echoes the nonce.

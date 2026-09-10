@@ -8,6 +8,7 @@ package transport
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 // Test handler that records calls
 type testHandler struct {
 	name      string
-	called    int
+	called    atomic.Int64
 	shouldErr bool
 }
 
 func (h *testHandler) Handle(ctx *MessageContext) error {
-	h.called++
+	h.called.Add(1)
 	if h.shouldErr {
 		return errors.New("test error")
 	}
@@ -32,13 +33,13 @@ func (h *testHandler) Handle(ctx *MessageContext) error {
 // Test middleware that records calls
 type testMiddleware struct {
 	name      string
-	called    int
+	called    atomic.Int64
 	shouldErr bool
 	skipNext  bool
 }
 
 func (m *testMiddleware) Middleware(ctx *MessageContext, next MessageHandlerFunc) error {
-	m.called++
+	m.called.Add(1)
 	if m.shouldErr {
 		return errors.New("middleware error")
 	}
@@ -65,7 +66,7 @@ func TestRegisterHandler(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test"}
 
-	err := router.Register("test-handler", MessageTypeChunkNotify, handler.Handle,
+	err := router.Register("test-handler", MessageType("chunk-notify"), handler.Handle,
 		WithPriority(10),
 		WithDescription("Test handler"))
 	if err != nil {
@@ -74,11 +75,11 @@ func TestRegisterHandler(t *testing.T) {
 
 	// Verify registration
 	handlers := router.List()
-	if len(handlers[MessageTypeChunkNotify]) != 1 {
-		t.Fatalf("expected 1 handler, got %d", len(handlers[MessageTypeChunkNotify]))
+	if len(handlers[MessageType("chunk-notify")]) != 1 {
+		t.Fatalf("expected 1 handler, got %d", len(handlers[MessageType("chunk-notify")]))
 	}
 
-	reg := handlers[MessageTypeChunkNotify][0]
+	reg := handlers[MessageType("chunk-notify")][0]
 	if reg.Name != "test-handler" {
 		t.Errorf("expected name 'test-handler', got %q", reg.Name)
 	}
@@ -95,12 +96,12 @@ func TestRegisterDuplicateName(t *testing.T) {
 	handler1 := &testHandler{name: "handler1"}
 	handler2 := &testHandler{name: "handler2"}
 
-	err := router.Register("duplicate", MessageTypeChunkNotify, handler1.Handle)
+	err := router.Register("duplicate", MessageType("chunk-notify"), handler1.Handle)
 	if err != nil {
 		t.Fatalf("First register failed: %v", err)
 	}
 
-	err = router.Register("duplicate", MessageTypeBeat, handler2.Handle)
+	err = router.Register("duplicate", MessageType("beat"), handler2.Handle)
 	if err == nil {
 		t.Error("Expected error registering duplicate name, got nil")
 	}
@@ -113,11 +114,11 @@ func TestHandlerPriority(t *testing.T) {
 	h3 := &testHandler{name: "medium-priority"}
 
 	// Register in random order
-	router.Register("low", MessageTypeChunkNotify, h1.Handle, WithPriority(100))
-	router.Register("high", MessageTypeChunkNotify, h2.Handle, WithPriority(10))
-	router.Register("medium", MessageTypeChunkNotify, h3.Handle, WithPriority(50))
+	router.Register("low", MessageType("chunk-notify"), h1.Handle, WithPriority(100))
+	router.Register("high", MessageType("chunk-notify"), h2.Handle, WithPriority(10))
+	router.Register("medium", MessageType("chunk-notify"), h3.Handle, WithPriority(50))
 
-	handlers := router.List()[MessageTypeChunkNotify]
+	handlers := router.List()[MessageType("chunk-notify")]
 	if len(handlers) != 3 {
 		t.Fatalf("expected 3 handlers, got %d", len(handlers))
 	}
@@ -138,16 +139,16 @@ func TestRouteSuccess(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test"}
 
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err != nil {
 		t.Fatalf("Route failed: %v", err)
 	}
 
-	if handler.called != 1 {
-		t.Errorf("expected handler called once, got %d", handler.called)
+	if handler.called.Load() != 1 {
+		t.Errorf("expected handler called once, got %d", handler.called.Load())
 	}
 
 	metrics := router.GetMetrics()
@@ -160,15 +161,15 @@ func TestRouteNoHandler(t *testing.T) {
 	router := NewDNSMessageRouter()
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
 
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err == nil {
 		t.Error("Expected error for unhandled message type, got nil")
 	}
 
 	metrics := router.GetMetrics()
-	if metrics.UnhandledTypes[MessageTypeChunkNotify] != 1 {
+	if metrics.UnhandledTypes[MessageType("chunk-notify")] != 1 {
 		t.Errorf("expected 1 unhandled message, got %d",
-			metrics.UnhandledTypes[MessageTypeChunkNotify])
+			metrics.UnhandledTypes[MessageType("chunk-notify")])
 	}
 }
 
@@ -176,10 +177,10 @@ func TestRouteHandlerError(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test", shouldErr: true}
 
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err == nil {
 		t.Error("Expected error from handler, got nil")
 	}
@@ -190,7 +191,7 @@ func TestRouteHandlerError(t *testing.T) {
 	}
 
 	// Check handler metrics
-	handlers := router.List()[MessageTypeChunkNotify]
+	handlers := router.List()[MessageType("chunk-notify")]
 	if handlers[0].ErrorCount.Load() != 1 {
 		t.Errorf("expected 1 error count on handler, got %d", handlers[0].ErrorCount.Load())
 	}
@@ -205,23 +206,23 @@ func TestMiddlewareChain(t *testing.T) {
 	// Add middleware in order
 	router.Use(mw1.Middleware)
 	router.Use(mw2.Middleware)
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err != nil {
 		t.Fatalf("Route failed: %v", err)
 	}
 
 	// Verify execution order: mw1 -> mw2 -> handler
-	if mw1.called != 1 {
-		t.Errorf("expected mw1 called once, got %d", mw1.called)
+	if mw1.called.Load() != 1 {
+		t.Errorf("expected mw1 called once, got %d", mw1.called.Load())
 	}
-	if mw2.called != 1 {
-		t.Errorf("expected mw2 called once, got %d", mw2.called)
+	if mw2.called.Load() != 1 {
+		t.Errorf("expected mw2 called once, got %d", mw2.called.Load())
 	}
-	if handler.called != 1 {
-		t.Errorf("expected handler called once, got %d", handler.called)
+	if handler.called.Load() != 1 {
+		t.Errorf("expected handler called once, got %d", handler.called.Load())
 	}
 }
 
@@ -231,17 +232,17 @@ func TestMiddlewareError(t *testing.T) {
 	mw := &testMiddleware{name: "mw", shouldErr: true}
 
 	router.Use(mw.Middleware)
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err == nil {
 		t.Error("Expected middleware error, got nil")
 	}
 
 	// Handler should not be called
-	if handler.called != 0 {
-		t.Errorf("expected handler not called, got %d calls", handler.called)
+	if handler.called.Load() != 0 {
+		t.Errorf("expected handler not called, got %d calls", handler.called.Load())
 	}
 }
 
@@ -251,17 +252,17 @@ func TestMiddlewareSkipNext(t *testing.T) {
 	mw := &testMiddleware{name: "mw", skipNext: true}
 
 	router.Use(mw.Middleware)
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err != nil {
 		t.Fatalf("Route failed: %v", err)
 	}
 
 	// Handler should not be called
-	if handler.called != 0 {
-		t.Errorf("expected handler not called, got %d calls", handler.called)
+	if handler.called.Load() != 0 {
+		t.Errorf("expected handler not called, got %d calls", handler.called.Load())
 	}
 }
 
@@ -270,21 +271,21 @@ func TestMultipleHandlersSameType(t *testing.T) {
 	h1 := &testHandler{name: "handler1"}
 	h2 := &testHandler{name: "handler2"}
 
-	router.Register("h1", MessageTypeChunkNotify, h1.Handle, WithPriority(10))
-	router.Register("h2", MessageTypeChunkNotify, h2.Handle, WithPriority(20))
+	router.Register("h1", MessageType("chunk-notify"), h1.Handle, WithPriority(10))
+	router.Register("h2", MessageType("chunk-notify"), h2.Handle, WithPriority(20))
 
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	err := router.Route(ctx, MessageTypeChunkNotify)
+	err := router.Route(ctx, MessageType("chunk-notify"))
 	if err != nil {
 		t.Fatalf("Route failed: %v", err)
 	}
 
 	// Both handlers should be called
-	if h1.called != 1 {
-		t.Errorf("expected h1 called once, got %d", h1.called)
+	if h1.called.Load() != 1 {
+		t.Errorf("expected h1 called once, got %d", h1.called.Load())
 	}
-	if h2.called != 1 {
-		t.Errorf("expected h2 called once, got %d", h2.called)
+	if h2.called.Load() != 1 {
+		t.Errorf("expected h2 called once, got %d", h2.called.Load())
 	}
 }
 
@@ -293,8 +294,8 @@ func TestWalk(t *testing.T) {
 	h1 := &testHandler{name: "h1"}
 	h2 := &testHandler{name: "h2"}
 
-	router.Register("h1", MessageTypeChunkNotify, h1.Handle)
-	router.Register("h2", MessageTypeBeat, h2.Handle)
+	router.Register("h1", MessageType("chunk-notify"), h1.Handle)
+	router.Register("h2", MessageType("beat"), h2.Handle)
 
 	var count int
 	err := router.Walk(func(reg *HandlerRegistration) error {
@@ -314,7 +315,7 @@ func TestWalkError(t *testing.T) {
 	router := NewDNSMessageRouter()
 	h1 := &testHandler{name: "h1"}
 
-	router.Register("h1", MessageTypeChunkNotify, h1.Handle)
+	router.Register("h1", MessageType("chunk-notify"), h1.Handle)
 
 	err := router.Walk(func(reg *HandlerRegistration) error {
 		return errors.New("walk error")
@@ -329,16 +330,16 @@ func TestList(t *testing.T) {
 	h1 := &testHandler{name: "h1"}
 	h2 := &testHandler{name: "h2"}
 
-	router.Register("h1", MessageTypeChunkNotify, h1.Handle)
-	router.Register("h2", MessageTypeChunkNotify, h2.Handle)
+	router.Register("h1", MessageType("chunk-notify"), h1.Handle)
+	router.Register("h2", MessageType("chunk-notify"), h2.Handle)
 
 	list := router.List()
 	if len(list) != 1 {
 		t.Errorf("expected 1 message type, got %d", len(list))
 	}
-	if len(list[MessageTypeChunkNotify]) != 2 {
+	if len(list[MessageType("chunk-notify")]) != 2 {
 		t.Errorf("expected 2 handlers for CHUNK_NOTIFY, got %d",
-			len(list[MessageTypeChunkNotify]))
+			len(list[MessageType("chunk-notify")]))
 	}
 }
 
@@ -348,7 +349,7 @@ func TestDescribe(t *testing.T) {
 	mw := &testMiddleware{name: "mw"}
 
 	router.Use(mw.Middleware)
-	router.Register("test", MessageTypeChunkNotify, handler.Handle,
+	router.Register("test", MessageType("chunk-notify"), handler.Handle,
 		WithDescription("Test handler"))
 
 	desc := router.Describe()
@@ -366,16 +367,16 @@ func TestHandlerMetrics(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test"}
 
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	// Execute multiple times
 	for i := 0; i < 5; i++ {
 		ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-		router.Route(ctx, MessageTypeChunkNotify)
+		router.Route(ctx, MessageType("chunk-notify"))
 		time.Sleep(1 * time.Millisecond) // Add some latency
 	}
 
-	handlers := router.List()[MessageTypeChunkNotify]
+	handlers := router.List()[MessageType("chunk-notify")]
 	reg := handlers[0]
 
 	if reg.CallCount.Load() != 5 {
@@ -390,11 +391,11 @@ func TestReset(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test"}
 
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	// Generate some metrics
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-	router.Route(ctx, MessageTypeChunkNotify)
+	router.Route(ctx, MessageType("chunk-notify"))
 
 	// Reset
 	router.Reset()
@@ -404,7 +405,7 @@ func TestReset(t *testing.T) {
 		t.Errorf("expected 0 total messages after reset, got %d", metrics.TotalMessages)
 	}
 
-	handlers := router.List()[MessageTypeChunkNotify]
+	handlers := router.List()[MessageType("chunk-notify")]
 	if handlers[0].CallCount.Load() != 0 {
 		t.Errorf("expected 0 call count after reset, got %d", handlers[0].CallCount.Load())
 	}
@@ -435,14 +436,14 @@ func TestConcurrentAccess(t *testing.T) {
 	router := NewDNSMessageRouter()
 	handler := &testHandler{name: "test"}
 
-	router.Register("test", MessageTypeChunkNotify, handler.Handle)
+	router.Register("test", MessageType("chunk-notify"), handler.Handle)
 
 	// Execute concurrently
 	done := make(chan bool)
 	for i := 0; i < 10; i++ {
 		go func() {
 			ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
-			router.Route(ctx, MessageTypeChunkNotify)
+			router.Route(ctx, MessageType("chunk-notify"))
 			done <- true
 		}()
 	}
@@ -452,8 +453,8 @@ func TestConcurrentAccess(t *testing.T) {
 		<-done
 	}
 
-	if handler.called != 10 {
-		t.Errorf("expected 10 calls, got %d", handler.called)
+	if handler.called.Load() != 10 {
+		t.Errorf("expected 10 calls, got %d", handler.called.Load())
 	}
 
 	metrics := router.GetMetrics()

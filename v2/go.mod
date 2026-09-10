@@ -2,19 +2,14 @@ module github.com/johanix/tdns-transport/v2
 
 go 1.25.2
 
-replace (
-	github.com/johanix/tdns/v2 => ../../tdns/v2
-	github.com/johanix/tdns/v2/cache => ../../tdns/v2/cache
-	github.com/johanix/tdns/v2/core => ../../tdns/v2/core
-	github.com/johanix/tdns/v2/edns0 => ../../tdns/v2/edns0
-)
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
 
 require (
 	github.com/cloudflare/circl v1.6.3
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
-	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2 v2.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/core v0.0.0-20260611090745-44755a2166f9
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20260611090745-44755a2166f9
 	github.com/miekg/dns v1.1.70
 )
 
@@ -28,7 +23,8 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20260611090745-44755a2166f9 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
@@ -43,13 +39,13 @@ require (
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/mod v0.31.0 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
-	golang.org/x/tools v0.40.0 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/mod v0.34.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

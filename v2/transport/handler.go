@@ -16,6 +16,7 @@ import (
 // This is routed to the hsyncengine for processing.
 type IncomingMessage struct {
 	Type            string    // "hello", "beat", "ping", "sync", "update", "relocate", "confirm"
+	TypeToken       string    // C1: the application verb (== Type during Stage C; see Token())
 	DistributionID  string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
 	SenderID        string    // Sender identity (from payload OriginatorID — original author)
 	TransportSender string    // Transport-level sender (from QNAME — who actually sent the DNS NOTIFY)
@@ -60,24 +61,6 @@ func ParseHelloPayload(payload []byte) (*DnsHelloPayload, error) {
 // ParseBeatPayload parses a beat message payload.
 func ParseBeatPayload(payload []byte) (*DnsBeatPayload, error) {
 	var p DnsBeatPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-// ParseSyncPayload parses a sync message payload.
-func ParseSyncPayload(payload []byte) (*DnsSyncPayload, error) {
-	var p DnsSyncPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-// ParseRelocatePayload parses a relocate message payload.
-func ParseRelocatePayload(payload []byte) (*DnsRelocatePayload, error) {
-	var p DnsRelocatePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
 	}

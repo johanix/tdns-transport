@@ -16,8 +16,6 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"github.com/johanix/tdns/v2/core"
 )
 
 // APITransport implements the Transport interface using HTTPS REST API.
@@ -158,102 +156,16 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 			fmt.Errorf("failed to unmarshal response: %w", err), false)
 	}
 
+	if !apiResp.Error {
+		peer.RecordMechanismBeatSent("API")
+	}
+
 	return &BeatResponse{
 		ResponderID: apiResp.Identity,
 		Timestamp:   time.Now(),
 		Sequence:    req.Sequence,
 		State:       apiResp.State,
 		Ack:         !apiResp.Error,
-	}, nil
-}
-
-// Sync sends a data synchronization request to a peer via HTTPS API.
-func (t *APITransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (*SyncResponse, error) {
-	url, err := apiURL(peer, "/sync")
-	if err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID, err, false)
-	}
-
-	// Use req.MessageType if set (e.g. "rfi"), default to "sync"
-	msgType := req.MessageType
-	if msgType == "" {
-		msgType = "sync"
-	}
-
-	apiReq := &apiSyncRequest{
-		MessageType:    msgType,
-		OriginatorID:   req.SenderID,
-		YourIdentity:   peer.ID,
-		Zone:           req.Zone,
-		SyncType:       req.SyncType.String(),
-		Records:        req.Records,
-		Operations:     req.Operations,
-		Serial:         req.Serial,
-		DistributionID: req.DistributionID,
-		RfiType:        req.RfiType,
-		Timestamp:      req.Timestamp.Unix(),
-	}
-	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
-	if err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID, err, true)
-	}
-
-	var apiResp apiSyncResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, NewTransportError("API", "Sync", peer.ID,
-			fmt.Errorf("failed to unmarshal response: %w", err), false)
-	}
-
-	status := ConfirmSuccess
-	if apiResp.Error {
-		status = ConfirmFailed
-	}
-
-	return &SyncResponse{
-		ResponderID:    apiResp.Identity,
-		Zone:           req.Zone,
-		DistributionID: req.DistributionID,
-		Status:         status,
-		Message:        apiResp.Msg,
-		Timestamp:      time.Now(),
-	}, nil
-}
-
-// Relocate requests a peer to use a different address via HTTPS API.
-func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRequest) (*RelocateResponse, error) {
-	url, err := apiURL(peer, "/relocate")
-	if err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID, err, false)
-	}
-
-	apiReq := &apiRelocateRequest{
-		MessageType: "RELOCATE",
-		MyIdentity:  req.SenderID,
-		NewAddress: apiAddress{
-			Host:      req.NewAddress.Host,
-			Port:      req.NewAddress.Port,
-			Transport: req.NewAddress.Transport,
-			Path:      req.NewAddress.Path,
-		},
-		Reason:     req.Reason,
-		ValidUntil: req.ValidUntil.Unix(),
-	}
-	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
-	if err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID, err, true)
-	}
-
-	var apiResp apiRelocateResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, NewTransportError("API", "Relocate", peer.ID,
-			fmt.Errorf("failed to unmarshal response: %w", err), false)
-	}
-
-	return &RelocateResponse{
-		ResponderID: apiResp.Identity,
-		Accepted:    apiResp.Accepted,
-		Message:     apiResp.Msg,
-		Timestamp:   time.Now(),
 	}, nil
 }
 
@@ -401,7 +313,7 @@ type apiSyncRequest struct {
 	Zone           string              `json:"zone"`
 	SyncType       string              `json:"sync_type"`
 	Records        map[string][]string `json:"records"`
-	Operations     []core.RROperation  `json:"operations,omitempty"`
+	Operations     json.RawMessage     `json:"operations,omitempty"`
 	Serial         uint32              `json:"serial"`
 	DistributionID string              `json:"distribution_id"`
 	RfiType        string              `json:"rfi_type,omitempty"`
@@ -414,29 +326,6 @@ type apiSyncResponse struct {
 	Msg            string `json:"msg,omitempty"`
 	Error          bool   `json:"error"`
 	ErrorMsg       string `json:"error_msg,omitempty"`
-}
-
-type apiAddress struct {
-	Host      string `json:"host"`
-	Port      uint16 `json:"port"`
-	Transport string `json:"transport"`
-	Path      string `json:"path,omitempty"`
-}
-
-type apiRelocateRequest struct {
-	MessageType string     `json:"message_type"`
-	MyIdentity  string     `json:"my_identity"`
-	NewAddress  apiAddress `json:"new_address"`
-	Reason      string     `json:"reason"`
-	ValidUntil  int64      `json:"valid_until"`
-}
-
-type apiRelocateResponse struct {
-	Identity string `json:"identity,omitempty"`
-	Accepted bool   `json:"accepted"`
-	Msg      string `json:"msg,omitempty"`
-	Error    bool   `json:"error"`
-	ErrorMsg string `json:"error_msg,omitempty"`
 }
 
 type apiPingRequest struct {

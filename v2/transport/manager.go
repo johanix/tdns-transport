@@ -88,20 +88,59 @@ type TransportManager struct {
 	LocalID     string
 	ControlZone string
 
-	// OnPeerDiscovered is invoked by the application's discovery loop
-	// (or, in a future phase, by transport itself) when peer discovery
-	// completes successfully. The application registers a function here
-	// at startup; transport never sets it. Optional — if nil, callers
-	// must skip the invocation.
+	// OnPeerDiscovered is the application's hook for a completed
+	// discovery. The application sets it at startup; transport never
+	// sets it; nil means no callback. The callback receives the
+	// registered, non-nil *Peer.
 	//
-	// This is the seam through which the per-application discovery
-	// completion logic (sync state, set preferred mechanism, transition
-	// peer to KNOWN) is dispatched. See Bite 8 in
-	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
-	OnPeerDiscovered func(peerID string)
+	// Fired by transport itself, at the end of every successful
+	// RegisterDiscoveredPeer (discovery runs in transport since Phase
+	// 2.6): addresses, mechanism states and crypto slots are already on
+	// the peer when the application sees it, so the callback only
+	// materializes the application's own view of it.
+	OnPeerDiscovered func(peer *Peer)
+
+	// OnDiscoveryFailed is invoked when a peer-discovery attempt
+	// fails. The application's discovery loop is responsible for
+	// retries — this callback fires once per failed attempt round,
+	// not once forever; the same peer may produce multiple
+	// invocations across the lifetime of the loop.
+	//
+	// Optional. If nil, transport takes no action beyond what the
+	// invocation site already does on failure (e.g. logging).
+	//
+	// Symmetric with OnPeerDiscovered: invocation site resolves the
+	// peer (using GetOrCreate when discovery fails before a peer
+	// has materialised) and passes a non-nil *Peer plus the error
+	// that ended this round.
+	//
+	// Fired when a discovery round for the peer ends in failure: no
+	// usable endpoint, or a registration the transport refused. The
+	// application's retry loop drives the rounds and fires it for the
+	// rounds it runs; an established peer must not be regressed by it.
+	OnDiscoveryFailed func(peer *Peer, err error)
+
+	// GetImr late-binds the IMR resolver used by the in-package discovery
+	// process (the resolver starts asynchronously after the manager is
+	// constructed). Set by the application at startup; nil means fresh
+	// discovery cannot run (DiscoverPeer only returns already-known
+	// peers).
+	//
+	// Phase 2.6: replaces the TEMPORARY DiscoveryDriver seam — the
+	// discovery process now lives in this package (discovery.go).
+	GetImr func() *Imr
 
 	// Which mechanisms are active
 	supportedMechanisms []string
+}
+
+// SetSupportedMechanisms sets the active mechanism set for managers
+// constructed via struct literal rather than NewTransportManager (tdns-mp
+// builds its bridge that way). The in-package discovery process consults
+// this via IsTransportSupported (Fix E: only locally-supported transports
+// are probed).
+func (tm *TransportManager) SetSupportedMechanisms(mechanisms []string) {
+	tm.supportedMechanisms = mechanisms
 }
 
 // NewTransportManager creates and wires all transport components.
@@ -254,19 +293,14 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // chosen by SelectTransport, falling back to the alternative on
 // error. The message type is determined by the concrete type of req:
 //
-//   - *SyncRequest    → Transport.Sync
+//   - *AppMessage     → Transport.SendApp (all application verbs; C2)
 //   - *PingRequest    → Transport.Ping
-//   - *RelocateRequest → Transport.Relocate
 //
-// (Hello and Beat are deliberately NOT supported by this generic
-// path. In the current codebase those operations send on all
-// available transports in parallel rather than primary-then-
-// fallback, with substantial application-side bookkeeping mixed
-// in. Wrapping them under a generic Send would change semantics.
-// Phase 5 of the main refactor will address that separately.)
+// (Hello and Beat are deliberately NOT supported by this
+// primary-then-fallback path: they are sent on every eligible
+// mechanism, each outcome mattering. Use SendAll for them (D1).)
 //
-// Returns the response (one of *SyncResponse, *PingResponse,
-// *RelocateResponse) or an error if both transports failed or the
+// Returns the response (one of *AppResponse, *PingResponse) or an error if both transports failed or the
 // message type is unsupported.
 //
 // Bite 3 of the transport refactor early-bites plan; see
@@ -276,20 +310,47 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 		return nil, fmt.Errorf("Send: peer is nil")
 	}
 	primary := tm.SelectTransport(peer)
+	// Only the sync family has an API endpoint; every other application
+	// verb is DNS-only. Route those to DNS up front rather than letting
+	// the API primary reject them and relying on the fallback.
+	if am, ok := req.(*AppMessage); ok && am != nil && !IsSyncFamily(am.TypeToken) &&
+		primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
+		primary = tm.DNSTransport
+	}
 
 	dispatch := func(t Transport) (interface{}, error) {
 		if t == nil {
 			return nil, fmt.Errorf("no transport selected")
 		}
 		switch r := req.(type) {
-		case *SyncRequest:
-			return t.Sync(ctx, peer, r)
+		case *AppMessage:
+			resp, err := t.SendApp(ctx, peer, r)
+			if err != nil {
+				return nil, err
+			}
+			// A non-ok confirmation of a zone-data verb is an
+			// application-level rejection; report it as a retryable
+			// error so the caller's queue retries (the pre-C2
+			// DNSTransport.Sync contract).
+			if resp.Status == ConfirmFailed && IsSyncFamily(r.TypeToken) {
+				return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID,
+					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
+			}
+			return resp, nil
 		case *PingRequest:
-			return t.Ping(ctx, peer, r)
-		case *RelocateRequest:
-			return t.Relocate(ctx, peer, r)
+			resp, err := t.Ping(ctx, peer, r)
+			if err != nil {
+				return nil, err
+			}
+			if resp != nil && !resp.OK {
+				// A negative acknowledgement counts as a failed send for
+				// the fallback decision, not as a success with OK=false.
+				return resp, NewTransportError(t.Name(), "Ping", peer.ID,
+					fmt.Errorf("ping not acknowledged by %s", peer.ID), true)
+			}
+			return resp, nil
 		default:
-			return nil, fmt.Errorf("Send: unsupported message type %T (use Hello/Beat directly for parallel-send semantics)", req)
+			return nil, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
 		}
 	}
 
@@ -338,21 +399,69 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 	return tm.ReliableQueue.GetPendingMessages()
 }
 
-// SendPing sends a ping to a peer using the best available transport.
-func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResponse, error) {
-	t := tm.SelectTransport(peer)
-	if t == nil {
-		return nil, NewTransportError("", "ping", peer.ID, fmt.Errorf("no transport available for peer %s", peer.ID), false)
+// DiscoverPeer initiates peer discovery for the given identity and
+// blocks until discovery completes, the context is cancelled, or
+// discovery fails. Returns the resolved Peer on success.
+//
+// If a peer with this identity is already in PeerStateKnown (or
+// higher), DiscoverPeer returns it immediately without re-discovery.
+// Otherwise the in-package discovery process runs (discovery.go —
+// Phase 2.6; the TEMPORARY DiscoveryDriver seam is gone). When
+// tm.GetImr is nil, DiscoverPeer can only return already-known
+// peers; an unknown identity yields an error.
+//
+// The asynchronous discovery path (the application's polling loop
+// that watches for NEEDED peers) is unaffected by this method.
+// Callers wanting fire-and-forget behaviour can launch their own
+// goroutine — DiscoverPeer is intentionally synchronous so that
+// CLI commands, tests, and other inline callers can use the result
+// immediately.
+func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (*Peer, error) {
+	if identity == "" {
+		return nil, fmt.Errorf("DiscoverPeer: empty identity")
 	}
+	peer := tm.PeerRegistry.GetOrCreate(identity)
+	if peer.EffectiveState() >= PeerStateKnown {
+		return peer, nil
+	}
+	if tm.GetImr == nil {
+		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no IMR accessor configured", identity)
+	}
+	if err := tm.DiscoverAndRegisterPeer(ctx, identity); err != nil {
+		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
+	}
+	if peer.EffectiveState() < PeerStateKnown {
+		return nil, fmt.Errorf("DiscoverPeer: discovery succeeded but peer %q state is %v, expected >= Known",
+			identity, peer.EffectiveState())
+	}
+	return peer, nil
+}
+
+// SendPing sends a ping to a peer using the best available
+// transport, falling back to the alternate transport if the primary
+// fails with a retryable error. Bite G: delegates to tm.Send so that
+// ping inherits the primary-then-fallback behaviour from the generic
+// path; Hello and Beat are NOT migrated to tm.Send because their
+// wrappers send on all transports in parallel rather than
+// primary-then-fallback (Phase 5 of the main refactor).
+func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResponse, error) {
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("failed to generate ping nonce: %w", err)
 	}
-	return t.Ping(ctx, peer, &PingRequest{
+	resp, err := tm.Send(ctx, peer, &PingRequest{
 		SenderID:  tm.LocalID,
 		Nonce:     hex.EncodeToString(nonce),
 		Timestamp: time.Now(),
 	})
+	if err != nil {
+		return nil, err
+	}
+	pingResp, ok := resp.(*PingResponse)
+	if !ok {
+		return nil, fmt.Errorf("SendPing: unexpected response type %T", resp)
+	}
+	return pingResp, nil
 }
 
 // IsTransportSupported checks if a transport mechanism is enabled.
