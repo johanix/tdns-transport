@@ -361,7 +361,11 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if result.JWKData != "" {
 			peer.SetMechanismJWK("DNS", result.JWKData, result.KeyAlgorithm)
 		}
-		peer.SetMechanismKeyRR("DNS", result.LegacyKeyRR)
+		// KEY record likewise only when discovered: a re-discovery that
+		// found a JWK (or nothing) must not wipe a pinned legacy key.
+		if result.LegacyKeyRR != nil {
+			peer.SetMechanismKeyRR("DNS", result.LegacyKeyRR)
+		}
 	} else if result.DNSUri != "" {
 		peer.SetMechanismContactInfo("DNS", "partial")
 		raw, _ := peer.MechanismRawState("DNS")

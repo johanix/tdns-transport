@@ -150,7 +150,7 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qname, opType string, payload []byte) error {
 	addr := peer.CurrentAddress()
 	finalPayload := payload
-	var payloadFormat uint8 = core.FormatJSON
+	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
 		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
 		if err != nil {
@@ -158,7 +158,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = EnvelopeJOSE
 	}
 	m := new(dns.Msg)
 	m.SetNotify(qname)

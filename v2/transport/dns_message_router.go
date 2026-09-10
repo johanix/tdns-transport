@@ -36,6 +36,12 @@ type MessageContext struct {
 	ChunkPayload []byte
 	ChunkSigned  bool
 	ChunkCrypted bool
+	// ChunkEnvelope is the envelope label of the payload currently in
+	// ChunkPayload (EnvelopeNone once the receive path has decrypted it);
+	// EnvelopeUnknown when no label was recorded, in which case readers
+	// fall back to sniffing the bytes. The label as received is kept in
+	// Data["wire_envelope"].
+	ChunkEnvelope uint8
 
 	// Peer information (populated by authorization middleware)
 	PeerID          string

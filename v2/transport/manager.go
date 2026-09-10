@@ -98,11 +98,11 @@ type TransportManager struct {
 	// PeerRegistry before calling; the callback receives a non-nil
 	// *Peer and never has to repeat the lookup itself.
 	//
-	// This is the seam through which the per-application discovery
-	// completion logic (sync state, set preferred mechanism, transition
-	// peer to KNOWN) is dispatched. See Bite 8 in
-	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md and
-	// Bite E in tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+	// Fired by transport itself, at the end of every successful
+	// RegisterDiscoveredPeer (discovery runs in transport since Phase
+	// 2.6): addresses, mechanism states and crypto slots are already on
+	// the peer when the application sees it, so the callback only
+	// materializes the application's own view of it.
 	OnPeerDiscovered func(peer *Peer)
 
 	// OnDiscoveryFailed is invoked when a peer-discovery attempt
@@ -119,12 +119,10 @@ type TransportManager struct {
 	// has materialised) and passes a non-nil *Peer plus the error
 	// that ended this round.
 	//
-	// Currently invoked by MP's discovery loop in attemptDiscovery
-	// when a discovery round returns no useful endpoints or
-	// registration fails; will be invoked by transport itself once
-	// discovery moves into transport (Phase 6 part 2 of the
-	// transport interface redesign). See Bite D in
-	// tdns-mp/docs/2026-04-30-transport-refactor-semi-easy-bites.md.
+	// Fired when a discovery round for the peer ends in failure: no
+	// usable endpoint, or a registration the transport refused. The
+	// application's retry loop drives the rounds and fires it for the
+	// rounds it runs; an established peer must not be regressed by it.
 	OnDiscoveryFailed func(peer *Peer, err error)
 
 	// GetImr late-binds the IMR resolver used by the in-package discovery
@@ -321,7 +319,7 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	// verb is DNS-only. Route those to DNS up front rather than letting
 	// the API primary reject them and relying on the fallback.
 	if am, ok := req.(*AppMessage); ok && am != nil && !IsSyncFamily(am.TypeToken) &&
-		primary == tm.APITransport && tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
 		primary = tm.DNSTransport
 	}
 

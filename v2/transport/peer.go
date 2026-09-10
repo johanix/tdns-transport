@@ -81,8 +81,6 @@ type Peer struct {
 	// Capabilities
 	Capabilities []string // What the peer supports
 
-	// Shared zones
-
 	// Communication state (single-state legacy fields, kept in sync with
 	// Mechanisms via dual-write — see Bite 1 in
 	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md).
@@ -105,9 +103,10 @@ type Peer struct {
 	LivenessInterval uint32
 
 	// Per-mechanism state (Bite 1, additive). Keys: "API", "DNS".
-	// Populated in parallel with the legacy single-state fields above
-	// during the dual-write window. The legacy fields remain canonical
-	// until Phase 1 of the main refactor deletes them.
+	// Per-mechanism state is what discovery and the hello/beat paths
+	// write and what the send gates read (D2.5); the single-state fields
+	// above stay for display and for peers that predate per-mechanism
+	// state.
 	Mechanisms map[string]*MechanismState
 
 	// Per-mechanism cryptographic material discovered for this peer

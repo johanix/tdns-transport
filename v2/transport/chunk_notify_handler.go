@@ -193,12 +193,18 @@ func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
 // fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
 // Uses manifest-first fetch: fetches manifest (sequence 0), checks if inline, otherwise fetches data chunks 1..N.
 // Builds base qname as {receiver}.{distid}.{sender} and queries the sender.
-func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, error) {
+// A query-mode payload arrives unlabelled (EnvelopeUnknown) and the
+// receiver falls back to sniffing it: the CHUNK records it came in carry
+// the splitter's format, not the payload's envelope (the manifest and data
+// chunks are stamped FormatJSON whatever the payload is), and the
+// application's FetchChunkQuery callback returns bytes only. Labelling this
+// path is F2b's job, when transport owns the whole chunk chain.
+func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, uint8, error) {
 	if h.Transport == nil && h.FetchChunkQuery == nil {
-		return nil, fmt.Errorf("no transport or FetchChunkQuery callback for CHUNK query")
+		return nil, EnvelopeUnknown, fmt.Errorf("no transport or FetchChunkQuery callback for CHUNK query")
 	}
 	if senderID == "" {
-		return nil, fmt.Errorf("cannot derive sender for query mode (empty senderID)")
+		return nil, EnvelopeUnknown, fmt.Errorf("cannot derive sender for query mode (empty senderID)")
 	}
 
 	baseQname := buildChunkQueryQname(h.LocalID, distributionID, senderID)
@@ -215,29 +221,30 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 		}
 	}
 	if queryTarget == "" {
-		return nil, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderID)
+		return nil, EnvelopeUnknown, fmt.Errorf("no CHUNK payload in EDNS0 and no CHUNK query endpoint (no EDNS0 option 65005, no peer address for %q)", senderID)
 	}
 
 	// Phase 1: Fetch manifest (sequence 0)
 	if h.Transport == nil {
 		// Combiner/signer fallback: no Transport, use legacy single-fetch callback
-		return h.FetchChunkQuery(ctx, queryTarget, baseQname)
+		payload, err := h.FetchChunkQuery(ctx, queryTarget, baseQname)
+		return payload, EnvelopeUnknown, err
 	}
 
 	manifestQname := buildChunkQueryQnameWithSeq(0, baseQname)
 	manifestChunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, manifestQname)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch manifest (seq 0): %w", err)
+		return nil, EnvelopeUnknown, fmt.Errorf("failed to fetch manifest (seq 0): %w", err)
 	}
 
 	// Phase 2: Extract manifest data — check if payload is inline
 	manifestData, err := core.ExtractManifestData(manifestChunk)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+		return nil, EnvelopeUnknown, fmt.Errorf("failed to parse manifest: %w", err)
 	}
 	if manifestData.ChunkCount == 0 {
 		// Payload is inline in the manifest
-		return manifestData.Payload, nil
+		return manifestData.Payload, EnvelopeUnknown, nil
 	}
 
 	// Phase 3: Fetch data chunks 1..N and reassemble
@@ -246,11 +253,15 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 		chunkQname := buildChunkQueryQnameWithSeq(i, baseQname)
 		chunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, chunkQname)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch chunk %d/%d: %w", i, manifestData.ChunkCount, err)
+			return nil, EnvelopeUnknown, fmt.Errorf("failed to fetch chunk %d/%d: %w", i, manifestData.ChunkCount, err)
 		}
 		dataChunks = append(dataChunks, chunk)
 	}
-	return distrib.ReassembleCHUNKs(dataChunks)
+	payload, err := distrib.ReassembleCHUNKs(dataChunks)
+	if err != nil {
+		return nil, EnvelopeUnknown, err
+	}
+	return payload, EnvelopeUnknown, nil
 }
 
 // parsePayload parses the JSON payload to determine message type and content.
@@ -361,7 +372,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 	// Encrypt response when SecureWrapper is configured.
 	// H6: If encryption is enabled but fails, return SERVFAIL rather than sending plaintext.
 	// Sending an unencrypted response when encryption is expected would leak information.
-	var payloadFormat uint8 = core.FormatJSON
+	var payloadFormat uint8 = EnvelopeNone
 	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && senderID != "" {
 		encrypted, encErr := h.SecureWrapper.WrapOutgoing(senderID, payloadBytes)
 		if encErr != nil {
@@ -369,7 +380,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 			return h.sendResponse(w, req, dns.RcodeServerFailure)
 		}
 		payloadBytes = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = EnvelopeJOSE
 	}
 
 	resp := new(dns.Msg)
@@ -454,14 +465,24 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	}
 
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
-	payload, _, err := h.extractChunkPayload(msg)
+	payload, envelope, err := h.extractChunkPayload(msg)
 	if err != nil {
 		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
-		payload, err = h.fetchChunkViaQuery(ctx, senderHint, distributionID, msg, w)
+		payload, envelope, err = h.fetchChunkViaQuery(ctx, senderHint, distributionID, msg, w)
 		if err != nil {
 			lgTransport().Error("failed to get CHUNK payload (EDNS0 and query mode)", "err", err)
 			return h.sendResponse(w, msg, dns.RcodeFormatError)
 		}
+	}
+	// The envelope label decides what happens next; a label the receiver
+	// cannot handle is a malformed message, answered before any crypto.
+	if err := checkEnvelope(envelope); err != nil {
+		lgTransport().Warn("rejecting payload", "source", sourceAddr, "peer", senderHint, "err", err)
+		return h.sendResponse(w, msg, dns.RcodeFormatError)
+	}
+	if envelope == EnvelopeJOSE && (h.SecureWrapper == nil || !h.SecureWrapper.IsEnabled()) {
+		lgTransport().Warn("JOSE-wrapped payload but payload crypto is not enabled", "source", sourceAddr, "peer", senderHint)
+		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
 
 	// Decrypt the payload if it is encrypted.
@@ -470,7 +491,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	if h.SecureWrapper != nil {
 		lgTransport().Debug("attempting to decrypt payload", "source", sourceAddr, "key_for", senderHint)
 
-		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
+		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeerEnvelope(payload, senderHint, envelope)
 		if err != nil {
 			// H5: Use sentinel error instead of string matching
 			if errors.Is(err, ErrNoVerificationKey) {
@@ -521,6 +542,8 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	msgCtx.RemoteAddr = sourceAddr
 	// Mark that we've already handled decryption (payload is now plaintext)
 	msgCtx.ChunkCrypted = false
+	msgCtx.ChunkEnvelope = EnvelopeNone
+	msgCtx.Data["wire_envelope"] = envelope
 	msgCtx.SignatureValid = true // We verified during decryption above
 	msgCtx.SignatureReason = "decrypted_by_router"
 	// Store local identity so handlers (e.g. ping) can include it in responses

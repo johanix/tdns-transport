@@ -462,11 +462,11 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 				return nil, fmt.Errorf("invalid CHUNK option: %w", err)
 			}
 			// Validate format byte before processing
-			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+			if chunkOpt.Format != EnvelopeNone && chunkOpt.Format != EnvelopeJOSE {
 				return nil, fmt.Errorf("unknown CHUNK format in ping confirm: %d", chunkOpt.Format)
 			}
 			data := chunkOpt.Data
-			if chunkOpt.Format == core.FormatJWT && sw != nil {
+			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
 				if err != nil {
 					return nil, fmt.Errorf("decryption of ping confirm failed: %w", err)
@@ -734,12 +734,12 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 				continue
 			}
 			// Validate format byte before processing
-			if chunkOpt.Format != core.FormatJSON && chunkOpt.Format != core.FormatJWT {
+			if chunkOpt.Format != EnvelopeNone && chunkOpt.Format != EnvelopeJOSE {
 				lgTransport().Warn("unknown CHUNK format in confirm response, skipping", "format", chunkOpt.Format)
 				continue
 			}
 			data := chunkOpt.Data
-			if chunkOpt.Format == core.FormatJWT && sw != nil {
+			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
 				decrypted, err := sw.UnwrapIncoming(peerID, data)
 				if err != nil {
 					continue

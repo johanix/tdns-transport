@@ -349,6 +349,8 @@ func base64URLDecode(data []byte) ([]byte, error) {
 
 // IsPayloadEncrypted checks if a payload appears to be encrypted (base64-encoded).
 // This is a heuristic check - encrypted payloads won't start with '{' after decode attempt.
+// Legacy: the receive path reads the envelope label instead (see
+// envelope.go); this sniff remains for payloads that carry no label.
 func IsPayloadEncrypted(payload []byte) bool {
 	// Try to parse as JSON first - if it works, it's not encrypted
 	var test interface{}
@@ -424,6 +426,34 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 	}
 
 	return decrypted, nil
+}
+
+// UnwrapIncomingFromPeerEnvelope is UnwrapIncomingFromPeer driven by the
+// payload's envelope label instead of a byte-sniff. EnvelopeNone returns the
+// payload as it is (what the sniff concluded for plain JSON until now);
+// EnvelopeJOSE requires payload crypto and the named peer's verification
+// key, and decrypts with that key only; EnvelopeUnknown keeps the legacy
+// sniffing behaviour for a payload that arrived without a label.
+func (w *SecurePayloadWrapper) UnwrapIncomingFromPeerEnvelope(payload []byte, requiredPeerID string, envelope uint8) ([]byte, error) {
+	switch envelope {
+	case EnvelopeUnknown:
+		return w.UnwrapIncomingFromPeer(payload, requiredPeerID)
+	case EnvelopeNone:
+		return payload, nil
+	case EnvelopeJOSE:
+		if w.crypto == nil || !w.crypto.Enabled {
+			return nil, fmt.Errorf("payload from %s is JOSE-wrapped but payload crypto is not enabled", requiredPeerID)
+		}
+		if _, exists := w.crypto.PeerVerificationKeys[dns.Fqdn(requiredPeerID)]; !exists {
+			return nil, fmt.Errorf("%w: peer %s", ErrNoVerificationKey, requiredPeerID)
+		}
+		decrypted, err := w.crypto.DecryptAndVerifyPayload(requiredPeerID, payload)
+		if err != nil {
+			return nil, fmt.Errorf("decryption failed for required peer %s: %w", requiredPeerID, err)
+		}
+		return decrypted, nil
+	}
+	return nil, checkEnvelope(envelope)
 }
 
 // IsEnabled returns true if encryption is enabled.

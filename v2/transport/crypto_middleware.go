@@ -82,8 +82,9 @@ func NewSignatureMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 			return next(ctx)
 		}
 
-		// Skip if payload is not encrypted/signed
-		if !IsPayloadEncrypted(ctx.ChunkPayload) {
+		// Skip if payload is not encrypted/signed (by its envelope label,
+		// or by sniffing when the receive path recorded none)
+		if !ctx.payloadIsJOSE() {
 			if cfg.AllowUnencrypted {
 				lgCrypto().Debug("allowing unencrypted payload", "peer", ctx.PeerID)
 				return next(ctx)
@@ -183,8 +184,8 @@ func NewDecryptionMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 			return next(ctx)
 		}
 
-		// Skip if payload is not encrypted
-		if !IsPayloadEncrypted(ctx.ChunkPayload) {
+		// Skip if payload is not encrypted (label first, sniff as fallback)
+		if !ctx.payloadIsJOSE() {
 			return next(ctx)
 		}
 
