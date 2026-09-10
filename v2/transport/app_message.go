@@ -193,8 +193,11 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		return nil, NewTransportError("API", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)
 	}
 	if !IsSyncFamily(msg.TypeToken) {
+		// Retryable: the verb exists, only this mechanism cannot carry it,
+		// so TransportManager.Send may fall back to DNS (it also routes
+		// DNS-only verbs to DNS up front; this is the belt to that brace).
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
-			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken), false)
+			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken), true)
 	}
 	url, err := apiURL(peer, "/sync")
 	if err != nil {
@@ -215,6 +218,13 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
 			fmt.Errorf("application payload is not a sync-family message: %w", err), false)
 	}
+	// Same contract as the DNS mechanism: transport generates the
+	// correlation id when the application left it empty, and the response
+	// carries the id that was actually sent.
+	distributionID := msg.DistributionID
+	if distributionID == "" {
+		distributionID = GenerateDistributionID()
+	}
 	apiReq := &apiSyncRequest{
 		MessageType:    msg.TypeToken,
 		OriginatorID:   app.OriginatorID,
@@ -223,7 +233,7 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		SyncType:       "UNKNOWN",
 		Records:        app.Records,
 		Operations:     app.Operations,
-		DistributionID: msg.DistributionID,
+		DistributionID: distributionID,
 		RfiType:        app.RfiType,
 		Timestamp:      app.Time.Unix(),
 	}
@@ -244,7 +254,7 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		ResponderID:    apiResp.Identity,
 		Scope:          msg.Scope,
 		TypeToken:      msg.TypeToken,
-		DistributionID: msg.DistributionID,
+		DistributionID: distributionID,
 		Status:         status,
 		Message:        apiResp.Msg,
 		Timestamp:      time.Now(),

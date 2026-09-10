@@ -79,6 +79,8 @@ type ChunkNotifyHandler struct {
 	// the verb (TypeToken), the application-level sender, the scope
 	// (zone) and the nonce; the field names inside the payload are the
 	// application's business. If nil, transport's built-in parser is used.
+	// Contract: a nil error means a non-nil message; a parser that cannot
+	// produce one returns an error (the sender gets FORMERR either way).
 	ParseApp func(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error)
 
 	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
@@ -498,6 +500,10 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	incomingMsg, err := parse(distributionID, payload, sourceAddr)
 	if err != nil {
 		lgTransport().Error("failed to parse payload", "err", err)
+		return h.sendResponse(w, msg, dns.RcodeFormatError)
+	}
+	if incomingMsg == nil {
+		lgTransport().Error("payload parser returned no message", "distrib", distributionID, "source", sourceAddr)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
 	// Set the transport-level sender (from QNAME) — distinct from SenderID (payload OriginatorID).

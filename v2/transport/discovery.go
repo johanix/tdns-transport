@@ -192,6 +192,45 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
 
 	// Register API transport address
+	// Register the JWK public key (preferred) with the payload crypto
+	if result.JWKData != "" && result.PublicKey != nil {
+		if tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
+			payloadCrypto := tm.DNSTransport.SecureWrapper.GetCrypto()
+			if payloadCrypto != nil && payloadCrypto.Backend != nil {
+				// Wrap the stdlib crypto.PublicKey in a backend-specific
+				// wrapper; the backend reconstructs its own PublicKey type.
+				wrappedKey, err := payloadCrypto.Backend.PublicKeyFromStdlib(result.PublicKey)
+				if err != nil {
+					lgTransport().Warn("failed to wrap public key", "identity", result.Identity, "err", err)
+				} else {
+					payloadCrypto.AddPeerKey(result.Identity, wrappedKey)
+					payloadCrypto.AddPeerVerificationKey(result.Identity, wrappedKey)
+					lgTransport().Info("added JWK public key to PayloadCrypto", "identity", result.Identity, "algorithm", result.KeyAlgorithm)
+				}
+			} else {
+				lgTransport().Warn("cannot add peer key - PayloadCrypto not configured")
+			}
+		} else {
+			lgTransport().Warn("cannot add peer key - SecureWrapper not configured")
+		}
+	}
+
+	// A usable DNS mechanism needs a payload verification key (JWK or
+	// KEY) when payload crypto is configured; without one the peer is
+	// unusable for encrypted communication. API-only discovery has no such
+	// requirement. Checked here, before any peer field is written, so a
+	// failed registration leaves the peer as it was.
+	dnsUsable := result.DNSUri != "" && len(result.DNSAddresses) > 0
+	if dnsUsable && tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
+		hasVerificationKey := false
+		if pc := tm.DNSTransport.SecureWrapper.GetCrypto(); pc != nil {
+			_, hasVerificationKey = pc.GetPeerVerificationKey(result.Identity)
+		}
+		if !hasVerificationKey {
+			return fmt.Errorf("discovery for %s found endpoint but no verification key (JWK/KEY lookup failed)", result.Identity)
+		}
+	}
+
 	if result.APIUri != "" {
 		parsed, err := url.Parse(result.APIUri)
 		if err != nil {
@@ -221,6 +260,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 				Path:      parsed.Path,
 			}
 			peer.SetDiscoveryAddress(addr)
+			peer.SetMechanismAddress("API", addr)
 			peer.APIEndpoint = result.APIUri
 			peer.PreferredTransport = "API"
 
@@ -254,12 +294,17 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 				Transport: "udp",
 			}
 
-			// If both transports exist, the DNS address goes to
-			// DiscoveryAddress (preferred for ping); the API address set
-			// above is overwritten.
+			// DiscoveryAddr is the slot the DNS carrier dials; when both
+			// mechanisms resolve it holds the DNS address (API sends use
+			// APIEndpoint). The per-mechanism slot keeps each address.
+			// API stays the preferred transport when it also resolved,
+			// matching Peer.PreferredMechanism and SelectTransport's default.
 			peer.SetDiscoveryAddress(addr)
+			peer.SetMechanismAddress("DNS", addr)
 			peer.DNSEndpoint = result.DNSUri // display/diagnostics (S2)
-			peer.PreferredTransport = "DNS"
+			if peer.PreferredTransport == "" {
+				peer.PreferredTransport = "DNS"
+			}
 
 			lgTransport().Info("registered peer with DNS endpoint", "identity", result.Identity, "endpoint", result.DNSUri, "address", host, "port", port)
 		}
@@ -269,41 +314,6 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// record lands in the per-mechanism crypto slot below)
 	if result.TLSA != nil {
 		peer.TLSARecord = []byte(result.TLSA.Certificate)
-	}
-
-	// Register the JWK public key (preferred) with the payload crypto
-	if result.JWKData != "" && result.PublicKey != nil {
-		if tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
-			payloadCrypto := tm.DNSTransport.SecureWrapper.GetCrypto()
-			if payloadCrypto != nil && payloadCrypto.Backend != nil {
-				// Wrap the stdlib crypto.PublicKey in a backend-specific
-				// wrapper; the backend reconstructs its own PublicKey type.
-				wrappedKey, err := payloadCrypto.Backend.PublicKeyFromStdlib(result.PublicKey)
-				if err != nil {
-					lgTransport().Warn("failed to wrap public key", "identity", result.Identity, "err", err)
-				} else {
-					payloadCrypto.AddPeerKey(result.Identity, wrappedKey)
-					payloadCrypto.AddPeerVerificationKey(result.Identity, wrappedKey)
-					lgTransport().Info("added JWK public key to PayloadCrypto", "identity", result.Identity, "algorithm", result.KeyAlgorithm)
-				}
-			} else {
-				lgTransport().Warn("cannot add peer key - PayloadCrypto not configured")
-			}
-		} else {
-			lgTransport().Warn("cannot add peer key - SecureWrapper not configured")
-		}
-	}
-
-	// Verify that a verification key was actually registered. If no JWK or
-	// KEY was found, the peer is unusable for encrypted communication.
-	hasVerificationKey := false
-	if tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
-		if pc := tm.DNSTransport.SecureWrapper.GetCrypto(); pc != nil {
-			_, hasVerificationKey = pc.GetPeerVerificationKey(result.Identity)
-		}
-	}
-	if !hasVerificationKey {
-		return fmt.Errorf("discovery for %s found endpoint but no verification key (JWK/KEY lookup failed)", result.Identity)
 	}
 
 	// Per-mechanism outcome: ContactInfo + guarded NEEDED→KNOWN promotion +
@@ -338,7 +348,6 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 			"identity", result.Identity, "uri", result.APIUri, "state", raw.String())
 	}
 
-	dnsUsable := result.DNSUri != "" && len(result.DNSAddresses) > 0
 	if dnsUsable {
 		peer.SetMechanismContactInfo("DNS", "complete")
 		if raw, ok := peer.MechanismRawState("DNS"); !ok || raw <= PeerStateNeeded {

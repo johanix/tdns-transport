@@ -317,6 +317,13 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 		return nil, fmt.Errorf("Send: peer is nil")
 	}
 	primary := tm.SelectTransport(peer)
+	// Only the sync family has an API endpoint; every other application
+	// verb is DNS-only. Route those to DNS up front rather than letting
+	// the API primary reject them and relying on the fallback.
+	if am, ok := req.(*AppMessage); ok && am != nil && !IsSyncFamily(am.TypeToken) &&
+		primary == tm.APITransport && tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		primary = tm.DNSTransport
+	}
 
 	dispatch := func(t Transport) (interface{}, error) {
 		if t == nil {
@@ -338,7 +345,17 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 			}
 			return resp, nil
 		case *PingRequest:
-			return t.Ping(ctx, peer, r)
+			resp, err := t.Ping(ctx, peer, r)
+			if err != nil {
+				return nil, err
+			}
+			if resp != nil && !resp.OK {
+				// A negative acknowledgement counts as a failed send for
+				// the fallback decision, not as a success with OK=false.
+				return resp, NewTransportError(t.Name(), "Ping", peer.ID,
+					fmt.Errorf("ping not acknowledged by %s", peer.ID), true)
+			}
+			return resp, nil
 		default:
 			return nil, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
 		}

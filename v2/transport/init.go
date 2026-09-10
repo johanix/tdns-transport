@@ -32,10 +32,31 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 		// handlers registered by InitializeRouter.
 		chunkHandler := transport.NewChunkNotifyHandler(controlZone, localID, dnsTransport)
 		router := transport.NewDNSMessageRouter()
-		if err := transport.InitializeRouter(router, &transport.RouterConfig{PeerRegistry: peerRegistry}); err != nil {
+		// Confirmations: a role that sends confirmed distributions (agent,
+		// auditor) must register the confirm handler, or confirmation
+		// NOTIFYs are answered REFUSED and the reliable queue never clears.
+		if err := transport.InitializeRouter(router, &transport.RouterConfig{
+			PeerRegistry:  peerRegistry,
+			Confirmations: true,
+		}); err != nil {
 			panic(err)
 		}
 		chunkHandler.Router = router
+
+		// Register a handler for every application verb this role accepts.
+		// InitializeRouter registers only the transport-own verbs (ping,
+		// hello, beat, confirm); an unregistered verb is answered REFUSED
+		// and never reaches the callback below. The handler itself can be
+		// a no-op: the middleware chain has already authorized, decrypted
+		// and parsed the message into ctx.Data["incoming_message"], and the
+		// application-level work happens in processIncomingDNSMessage.
+		appVerbHandler := func(ctx *transport.MessageContext) error { return nil }
+		for _, verb := range []string{"sync", "rfi", "keystate", "edits", "config", "audit", "status-update", "relocate"} {
+			if err := router.Register(verb+"-handler", transport.MessageType(verb), appVerbHandler,
+				transport.WithPriority(100), transport.WithDescription("application verb "+verb)); err != nil {
+				panic(err)
+			}
+		}
 
 		// Register the handler with tdns
 		// This creates an adapter from the generic handler to tdns.NotifyHandlerFunc

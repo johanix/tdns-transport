@@ -322,6 +322,26 @@ func timeSinceOrInf(t time.Time) time.Duration {
 // peer-level State field is not touched here; callers that want both
 // updated should call SetState as well (the dual-write contract
 // during Bite 1).
+// SetMechanismAddress records the resolved address of one mechanism
+// ("API", "DNS"). Discovery writes it next to DiscoveryAddr: DiscoveryAddr
+// is the single slot the DNS carrier dials (CurrentAddress), while the
+// per-mechanism slot is what HasMechanism and PreferredMechanism read, so
+// a mechanism whose address was discovered but never stored here would
+// look absent.
+func (p *Peer) SetMechanismAddress(name string, addr *Address) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.Address = addr
+}
+
 func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
