@@ -81,9 +81,9 @@ type Peer struct {
 	// Capabilities
 	Capabilities []string // What the peer supports
 
-	// Communication state (single-state legacy fields, kept in sync with
-	// Mechanisms via dual-write — see Bite 1 in
-	// tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md).
+	// Communication state, single-state view: kept for display and for
+	// peers that predate per-mechanism state. The send gates read
+	// Mechanisms, not these.
 	LastHelloSent     time.Time // When we last sent a hello
 	LastHelloReceived time.Time // When we last received a hello
 	LastBeatSent      time.Time // When we last sent a beat
@@ -102,7 +102,7 @@ type Peer struct {
 	// how many of our own beats a peer has missed. 0 ⇒ default (30s).
 	LivenessInterval uint32
 
-	// Per-mechanism state (Bite 1, additive). Keys: "API", "DNS".
+	// Per-mechanism state. Keys: "API", "DNS".
 	// Per-mechanism state is what discovery and the hello/beat paths
 	// write and what the send gates read (D2.5); the single-state fields
 	// above stay for display and for peers that predate per-mechanism
@@ -316,11 +316,6 @@ func timeSinceOrInf(t time.Time) time.Duration {
 	return time.Since(t)
 }
 
-// SetMechanismState updates the per-mechanism state. Creates the
-// MechanismState entry on first call for an unknown mechanism. The
-// peer-level State field is not touched here; callers that want both
-// updated should call SetState as well (the dual-write contract
-// during Bite 1).
 // SetMechanismAddress records the resolved address of one mechanism
 // ("API", "DNS"). Discovery writes it next to DiscoveryAddr: DiscoveryAddr
 // is the single slot the DNS carrier dials (CurrentAddress), while the
@@ -341,6 +336,10 @@ func (p *Peer) SetMechanismAddress(name string, addr *Address) {
 	m.Address = addr
 }
 
+// SetMechanismState updates the per-mechanism state. Creates the
+// MechanismState entry on first call for an unknown mechanism. The
+// peer-level State field is not touched here; a caller that wants the
+// display-level State moved as well calls SetState.
 func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

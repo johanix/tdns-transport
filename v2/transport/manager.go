@@ -88,15 +88,10 @@ type TransportManager struct {
 	LocalID     string
 	ControlZone string
 
-	// OnPeerDiscovered is invoked by the application's discovery loop
-	// (or, in a future phase, by transport itself) when peer discovery
-	// completes successfully. The application registers a function here
-	// at startup; transport never sets it. Optional — if nil, callers
-	// must skip the invocation.
-	//
-	// The invocation site is responsible for resolving the peer from
-	// PeerRegistry before calling; the callback receives a non-nil
-	// *Peer and never has to repeat the lookup itself.
+	// OnPeerDiscovered is the application's hook for a completed
+	// discovery. The application sets it at startup; transport never
+	// sets it; nil means no callback. The callback receives the
+	// registered, non-nil *Peer.
 	//
 	// Fired by transport itself, at the end of every successful
 	// RegisterDiscoveredPeer (discovery runs in transport since Phase
