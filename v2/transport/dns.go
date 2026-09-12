@@ -220,22 +220,8 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create hello payload using typed struct from core package
-	var zone string
-	if len(req.SharedZones) > 0 {
-		zone = req.SharedZones[0] // Use first shared zone
-	}
-
-	payload := &core.AgentHelloPost{
-		MessageType:  core.AgentMsgHello,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         zone,
-		Time:         req.Timestamp,
-		// Deprecated fields not set (omitempty)
-	}
-
-	payloadJSON, err := json.Marshal(payload)
+	// The hello payload (wire_own.go; the first shared zone is the hello's zone)
+	payloadJSON, err := json.Marshal(buildHelloPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Hello", peer.ID,
 			fmt.Errorf("failed to marshal hello payload: %w", err), false)
@@ -275,28 +261,16 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create beat payload using typed struct from core package
-	// Get shared zones from peer
 	// Shared zones come from the application (C7): transport keeps no zone
 	// knowledge on the peer.
-	sharedZones := req.Zones
-
-	if len(sharedZones) == 0 {
+	if len(req.Zones) == 0 {
 		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)
 	} else {
-		lgTransport().Debug("including shared zones in beat", "count", len(sharedZones), "peer", peer.ID, "zones", sharedZones)
+		lgTransport().Debug("including shared zones in beat", "count", len(req.Zones), "peer", peer.ID, "zones", req.Zones)
 	}
 
-	payload := &core.AgentBeatPost{
-		MessageType:  core.AgentMsgBeat,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Time:         req.Timestamp,
-		Zones:        sharedZones, // Include shared zones for authorization
-		Gossip:       req.Gossip,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
+	// The beat payload (wire_own.go)
+	payloadJSON, err := json.Marshal(buildBeatPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Beat", peer.ID,
 			fmt.Errorf("failed to marshal beat payload: %w", err), false)
@@ -339,15 +313,8 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create ping payload using typed struct from core package
-	payload := &core.AgentPingPost{
-		MessageType:  core.AgentMsgPing,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Nonce:        req.Nonce,
-		Time:         req.Timestamp,
-	}
-	payloadJSON, err := json.Marshal(payload)
+	// The ping payload (wire_own.go)
+	payloadJSON, err := json.Marshal(buildPingPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("failed to marshal ping payload: %w", err), false)

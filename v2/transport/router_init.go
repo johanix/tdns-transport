@@ -65,7 +65,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		// confirmed distributions and expect confirm NOTIFYs back.
 		err = router.Register(
 			"ConfirmationHandler",
-			MessageType("confirm"),
+			MessageType(VerbConfirm),
 			HandleConfirmation,
 			WithPriority(100),
 			WithDescription("Processes confirmation messages for pending operations"),
@@ -79,7 +79,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	// Ping handler (priority: 100)
 	err = router.Register(
 		"PingHandler",
-		MessageType("ping"),
+		MessageType(VerbPing),
 		HandlePing,
 		WithPriority(100),
 		WithDescription("Processes ping messages and sends immediate echo response"),
@@ -91,7 +91,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	// Hello handler (priority: 100)
 	err = router.Register(
 		"HelloHandler",
-		MessageType("hello"),
+		MessageType(VerbHello),
 		HandleHello,
 		WithPriority(100),
 		WithDescription("Processes Hello messages for peer introduction"),
@@ -103,7 +103,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	// Beat handler (priority: 100)
 	err = router.Register(
 		"BeatHandler",
-		MessageType("beat"),
+		MessageType(VerbBeat),
 		HandleBeat,
 		WithPriority(100),
 		WithDescription("Processes heartbeat messages from peers"),
