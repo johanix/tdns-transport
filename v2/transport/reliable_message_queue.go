@@ -68,8 +68,8 @@ type OutgoingMessage struct {
 	Nonce          string          // Unique nonce for replay protection (generated at Enqueue time)
 }
 
-// PendingMessage wraps an OutgoingMessage with delivery state tracking.
-type PendingMessage struct {
+// pendingMessage wraps an OutgoingMessage with delivery state tracking.
+type pendingMessage struct {
 	Message      *OutgoingMessage
 	State        MessageState
 	AttemptCount int
@@ -126,7 +126,7 @@ type ReliableMessageQueue struct {
 	mu sync.RWMutex
 
 	// Pending messages indexed by "{recipientID}.{distID}" (see pendingKey())
-	pending map[string]*PendingMessage
+	pending map[string]*pendingMessage
 
 	// isRecipientReadyFn checks whether a recipient is ready to receive messages.
 	// If nil, all recipients are considered ready.
@@ -165,7 +165,7 @@ type ReliableMessageQueueConfig struct {
 // NewReliableMessageQueue creates a new queue with the given configuration.
 func NewReliableMessageQueue(cfg *ReliableMessageQueueConfig) *ReliableMessageQueue {
 	q := &ReliableMessageQueue{
-		pending:            make(map[string]*PendingMessage),
+		pending:            make(map[string]*pendingMessage),
 		isRecipientReadyFn: cfg.IsRecipientReady,
 
 		baseBackoff:       withDefault(cfg.BaseBackoff, 2*time.Second),
@@ -179,9 +179,9 @@ func NewReliableMessageQueue(cfg *ReliableMessageQueueConfig) *ReliableMessageQu
 	return q
 }
 
-// SetSendFunc sets the function used to deliver messages. Must be called before Start().
+// setSendFunc sets the function used to deliver messages. Must be called before Start().
 // This is set by the caller to avoid circular dependency at construction time.
-func (q *ReliableMessageQueue) SetSendFunc(f func(ctx context.Context, msg *OutgoingMessage) error) {
+func (q *ReliableMessageQueue) setSendFunc(f func(ctx context.Context, msg *OutgoingMessage) error) {
 	q.sendFunc = f
 }
 
@@ -250,7 +250,7 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 		return fmt.Errorf("duplicate distribution ID: %s for recipient %s", msg.DistributionID, msg.RecipientID)
 	}
 
-	pending := &PendingMessage{
+	pending := &pendingMessage{
 		Message:     msg,
 		State:       MessageQueued,
 		NextAttempt: time.Now(), // Try immediately
@@ -360,7 +360,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	q.mu.Lock()
 
 	now := time.Now()
-	var toSend []*PendingMessage
+	var toSend []*pendingMessage
 	var toRemove []string
 
 	for key, pending := range q.pending {
@@ -420,7 +420,7 @@ func (q *ReliableMessageQueue) isRecipientReady(recipientID string) bool {
 }
 
 // attemptDelivery tries to send a message and handles the result.
-func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *PendingMessage) {
+func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pendingMessage) {
 	msg := pending.Message
 
 	if q.sendFunc == nil {
@@ -460,7 +460,7 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *Pen
 // scheduleRetryLocked calculates the next retry time using exponential backoff.
 // Must be called with q.mu held.
 // If countAsAttempt is false, uses a fixed short backoff (for "not ready" cases).
-func (q *ReliableMessageQueue) scheduleRetryLocked(pending *PendingMessage, countAsAttempt bool) {
+func (q *ReliableMessageQueue) scheduleRetryLocked(pending *pendingMessage, countAsAttempt bool) {
 	if !countAsAttempt {
 		// Recipient not ready - use a fixed backoff, don't count as attempt
 		pending.NextAttempt = time.Now().Add(q.baseBackoff)
@@ -483,9 +483,9 @@ func (q *ReliableMessageQueue) scheduleRetryLocked(pending *PendingMessage, coun
 	slog.Debug("retry scheduled", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "backoff", backoff.Round(time.Millisecond), "attempt", pending.AttemptCount)
 }
 
-// GenerateQueueDistributionID creates a unique distribution ID for queue messages.
+// generateQueueDistributionID creates a unique distribution ID for queue messages.
 // Uses the same epoch+counter generator as the DNS transport layer.
-func GenerateQueueDistributionID() string {
+func generateQueueDistributionID() string {
 	return GenerateDistributionID()
 }
 

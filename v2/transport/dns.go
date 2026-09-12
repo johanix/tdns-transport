@@ -166,7 +166,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 
 	// Query mode keeps the records it will serve
 	if t.chunkMode == "query" && t.chunkStore == nil {
-		t.chunkStore = NewMemChunkStore(5 * time.Minute)
+		t.chunkStore = newMemChunkStore(5 * time.Minute)
 	}
 
 	return t
@@ -296,7 +296,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	if resp.Status == ConfirmSuccess {
-		peer.RecordMechanismBeatSent("DNS")
+		peer.recordMechanismBeatSent("DNS")
 	}
 
 	return &BeatResponse{
@@ -330,7 +330,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	finalPayload := payloadJSON
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
 			return nil, NewTransportError("DNS", "Ping", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
@@ -441,7 +441,7 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
-				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				decrypted, err := sw.unwrapIncoming(peerID, data)
 				if err != nil {
 					return nil, fmt.Errorf("decryption of ping confirm failed: %w", err)
 				}
@@ -506,7 +506,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	finalPayload := payloadJSON
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
 			return NewTransportError("DNS", "Confirm", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
@@ -537,7 +537,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 
-	peer.Stats.RecordMessageSent("confirm")
+	peer.Stats.recordMessageSent("confirm")
 	return nil
 }
 
@@ -549,7 +549,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	finalPayload := payload
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payload)
 		if err != nil {
 			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
@@ -640,7 +640,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	}
 
 	// Record sent message statistics
-	peer.Stats.RecordMessageSent(opType)
+	peer.Stats.recordMessageSent(opType)
 
 	if t.distributionMarkCompleted != nil {
 		t.distributionMarkCompleted(qname)
@@ -715,7 +715,7 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
-				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				decrypted, err := sw.unwrapIncoming(peerID, data)
 				if err != nil {
 					continue
 				}
@@ -730,9 +730,9 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 	return nil
 }
 
-// HandleIncomingConfirmation processes an incoming confirmation from the DNS responder.
+// handleIncomingConfirmation processes an incoming confirmation from the DNS responder.
 // This should be called by the DNS message handler when a confirmation NOTIFY is received.
-func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation) {
+func (t *DNSTransport) handleIncomingConfirmation(confirm *IncomingConfirmation) {
 	t.pendingMu.RLock()
 	pending, exists := t.pendingConfirmations[confirm.DistributionID]
 	t.pendingMu.RUnlock()
@@ -903,11 +903,11 @@ type DnsPingConfirmPayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
-// FetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
+// fetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
 // Used by the receiver in chunk_mode=query when NOTIFY has no EDNS0 payload.
-// FetchChunkRR sends a CHUNK query and returns the full CHUNK RR from the response.
-// This is the low-level method; FetchChunkViaQuery is a convenience wrapper.
-func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname string) (*core.CHUNK, error) {
+// fetchChunkRR sends a CHUNK query and returns the full CHUNK RR from the response.
+// This is the low-level method; fetchChunkViaQuery is a convenience wrapper.
+func (t *DNSTransport) fetchChunkRR(ctx context.Context, serverAddr, qname string) (*core.CHUNK, error) {
 	if host, port, err := net.SplitHostPort(serverAddr); err != nil {
 		if host != "" {
 			serverAddr = net.JoinHostPort(host, "53")
@@ -944,10 +944,10 @@ func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname strin
 	return nil, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
 }
 
-// FetchChunkViaQuery sends a CHUNK query and returns the payload data and format.
-// Convenience wrapper around FetchChunkRR.
-func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
-	chunk, err := t.FetchChunkRR(ctx, serverAddr, qname)
+// fetchChunkViaQuery sends a CHUNK query and returns the payload data and format.
+// Convenience wrapper around fetchChunkRR.
+func (t *DNSTransport) fetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
+	chunk, err := t.fetchChunkRR(ctx, serverAddr, qname)
 	if err != nil {
 		return nil, 0, err
 	}

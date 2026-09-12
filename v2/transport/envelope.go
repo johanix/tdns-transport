@@ -20,7 +20,7 @@ import (
 // every message already carries and that is read before reassembly and
 // before any cryptography. The values are the historical Format codes, so
 // the label costs no wire change and every sender to date already emits
-// it. It replaces the byte-sniff (IsPayloadEncrypted) as the receiver's
+// it. It replaces the byte-sniff (isPayloadEncrypted) as the receiver's
 // source of truth; the sniff survives only as the fallback for a payload
 // that reached the receiver without a label (EnvelopeUnknown: the legacy
 // query-mode fetch through the application's FetchChunkQuery callback).
@@ -43,8 +43,8 @@ const (
 // label rides in the Format byte. A mismatch is a build error.
 var _ = [1]struct{}{}[EnvelopeJOSE-core.FormatJWT]
 
-// EnvelopeString names an envelope label for logs.
-func EnvelopeString(e uint8) string {
+// envelopeString names an envelope label for logs.
+func envelopeString(e uint8) string {
 	switch e {
 	case EnvelopeUnknown:
 		return "unlabelled"
@@ -66,7 +66,7 @@ func checkEnvelope(e uint8) error {
 	case EnvelopeUnknown, EnvelopeNone, EnvelopeJOSE:
 		return nil
 	case EnvelopeCOSE:
-		return fmt.Errorf("envelope %s is not implemented", EnvelopeString(e))
+		return fmt.Errorf("envelope %s is not implemented", envelopeString(e))
 	}
 	return fmt.Errorf("unknown envelope label %d", e)
 }
@@ -78,5 +78,5 @@ func (ctx *MessageContext) payloadIsJOSE() bool {
 	if ctx.ChunkEnvelope != EnvelopeUnknown {
 		return ctx.ChunkEnvelope == EnvelopeJOSE
 	}
-	return IsPayloadEncrypted(ctx.ChunkPayload)
+	return isPayloadEncrypted(ctx.ChunkPayload)
 }

@@ -39,7 +39,7 @@ func TestIsPayloadEncrypted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsPayloadEncrypted(tt.payload)
+			result := isPayloadEncrypted(tt.payload)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v for payload: %s", tt.expected, result, tt.payload)
 			}

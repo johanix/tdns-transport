@@ -9,7 +9,7 @@ import (
 )
 
 func TestMemChunkStore(t *testing.T) {
-	s := NewMemChunkStore(time.Hour)
+	s := newMemChunkStore(time.Hour)
 	chunks := []*core.CHUNK{{Sequence: 0, Total: 1, Data: []byte("manifest")}, {Sequence: 1, Total: 1, Data: []byte("data")}}
 	s.SetChunks("b.d1.a.", chunks)
 	chunks[1].Data[0] = 'X' // the store keeps its own copy
@@ -33,7 +33,7 @@ func TestMemChunkStore(t *testing.T) {
 		t.Fatalf("Len = %d", s.Len())
 	}
 
-	expired := NewMemChunkStore(time.Nanosecond)
+	expired := newMemChunkStore(time.Nanosecond)
 	expired.SetChunks("b.d2.a.", chunks)
 	time.Sleep(2 * time.Millisecond)
 	if _, ok := expired.GetChunk("b.d2.a.", 0); ok {

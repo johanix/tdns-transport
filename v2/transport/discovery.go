@@ -47,11 +47,11 @@ type DiscoveryResult struct {
 	Partial      bool             // True if some records were found but discovery incomplete
 }
 
-// DiscoverAgentAPI performs DNS-based discovery of a peer's API transport.
+// discoverAgentAPI performs DNS-based discovery of a peer's API transport.
 //  1. URI record at _https._tcp.<identity> → get API endpoint URI and port
 //  2. SVCB record at api.<identity> → get ipv4hint/ipv6hint addresses
 //  3. TLSA record at _<port>._tcp.api.<identity> → get TLS certificate for verification
-func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *DiscoveryResult) {
+func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *DiscoveryResult) {
 	if imr == nil || imr.Imr == nil {
 		result.Error = fmt.Errorf("IMR engine not initialized")
 		result.Partial = true
@@ -59,14 +59,14 @@ func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *D
 	}
 	identity = dns.Fqdn(identity)
 
-	apiUri, apiHost, apiPort, err := imr.LookupAgentAPIEndpoint(ctx, identity)
+	apiUri, apiHost, apiPort, err := imr.lookupAgentAPIEndpoint(ctx, identity)
 	if err == nil {
 		result.APIUri = apiUri
 		result.Port = apiPort
 
 		// Look up SVCB at api.<identity> to get IP addresses
 		apiServiceName := "api." + identity
-		addresses, err := imr.LookupServiceAddresses(ctx, apiServiceName)
+		addresses, err := imr.lookupServiceAddresses(ctx, apiServiceName)
 		if err == nil {
 			result.APIAddresses = addresses
 		} else {
@@ -75,7 +75,7 @@ func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *D
 		}
 
 		// Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
-		tlsaRR, err := imr.LookupAgentTLSA(ctx, apiServiceName, apiPort)
+		tlsaRR, err := imr.lookupAgentTLSA(ctx, apiServiceName, apiPort)
 		if err == nil {
 			result.TLSA = tlsaRR
 		} else {
@@ -90,12 +90,12 @@ func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *D
 	}
 }
 
-// DiscoverAgentDNS performs DNS-based discovery of a peer's DNS transport.
+// discoverAgentDNS performs DNS-based discovery of a peer's DNS transport.
 //  1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
 //  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
 //  3. JWK record at dns.<identity> → get the peer's public key (preferred)
 //  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
-func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *DiscoveryResult) {
+func (imr *Imr) discoverAgentDNS(ctx context.Context, identity string, result *DiscoveryResult) {
 	if imr == nil || imr.Imr == nil {
 		result.Error = fmt.Errorf("IMR engine not initialized")
 		result.Partial = true
@@ -103,13 +103,13 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *D
 	}
 	identity = dns.Fqdn(identity)
 
-	dnsUri, dnsHost, dnsPort, err := imr.LookupAgentDNSEndpoint(ctx, identity)
+	dnsUri, dnsHost, dnsPort, err := imr.lookupAgentDNSEndpoint(ctx, identity)
 	if err == nil {
 		result.DNSUri = dnsUri
 
 		// Look up SVCB at dns.<identity> to get IP addresses
 		dnsServiceName := "dns." + identity
-		addresses, err := imr.LookupServiceAddresses(ctx, dnsServiceName)
+		addresses, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
 		if err == nil {
 			result.DNSAddresses = addresses
 		} else {
@@ -118,7 +118,7 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *D
 		}
 
 		// Look up JWK at dns.<identity> for the peer's public key
-		jwkData, publicKey, algorithm, err := imr.LookupAgentJWK(ctx, identity)
+		jwkData, publicKey, algorithm, err := imr.lookupAgentJWK(ctx, identity)
 		if err == nil {
 			result.JWKData = jwkData
 			result.PublicKey = publicKey
@@ -128,7 +128,7 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *D
 			lgTransport().Warn("JWK lookup failed", "identity", identity, "err", err)
 
 			// Fallback to KEY record for legacy support
-			keyRR, err := imr.LookupAgentKEY(ctx, identity)
+			keyRR, err := imr.lookupAgentKEY(ctx, identity)
 			if err == nil {
 				result.LegacyKeyRR = keyRR
 				lgTransport().Info("using legacy KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
@@ -144,11 +144,11 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *D
 	}
 }
 
-// DiscoverAgent performs DNS-based discovery of a peer's contact information,
+// discoverAgent performs DNS-based discovery of a peer's contact information,
 // but only for transports the LOCAL side supports (apiSupported/dnsSupported)
 // — Fix E: probing an unsupported transport emits failing lookups and sets a
-// spurious Partial. Each supported leg runs via DiscoverAgentAPI/DNS.
-func (imr *Imr) DiscoverAgent(ctx context.Context, identity string, apiSupported, dnsSupported bool) *DiscoveryResult {
+// spurious Partial. Each supported leg runs via discoverAgentAPI/DNS.
+func (imr *Imr) discoverAgent(ctx context.Context, identity string, apiSupported, dnsSupported bool) *DiscoveryResult {
 	result := &DiscoveryResult{
 		Identity: identity,
 	}
@@ -159,10 +159,10 @@ func (imr *Imr) DiscoverAgent(ctx context.Context, identity string, apiSupported
 	}
 
 	if apiSupported {
-		imr.DiscoverAgentAPI(ctx, identity, result)
+		imr.discoverAgentAPI(ctx, identity, result)
 	}
 	if dnsSupported {
-		imr.DiscoverAgentDNS(ctx, identity, result)
+		imr.discoverAgentDNS(ctx, identity, result)
 	}
 
 	// Check if we have enough information to contact the peer
@@ -224,7 +224,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	if dnsUsable && tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
 		hasVerificationKey := false
 		if pc := tm.DNSTransport.SecureWrapper.GetCrypto(); pc != nil {
-			_, hasVerificationKey = pc.GetPeerVerificationKey(result.Identity)
+			_, hasVerificationKey = pc.getPeerVerificationKey(result.Identity)
 		}
 		if !hasVerificationKey {
 			return fmt.Errorf("discovery for %s found endpoint but no verification key (JWK/KEY lookup failed)", result.Identity)
@@ -397,7 +397,7 @@ func (tm *TransportManager) DiscoverAndRegisterPeer(ctx context.Context, identit
 	}
 
 	// Fix E: only discover transports the local side supports.
-	result := imr.DiscoverAgent(ctx, identity, tm.IsTransportSupported("api"), tm.IsTransportSupported("dns"))
+	result := imr.discoverAgent(ctx, identity, tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 	if result.Error != nil {
 		return fmt.Errorf("discovery failed for %s: %w", identity, result.Error)
 	}

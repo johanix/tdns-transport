@@ -85,10 +85,10 @@ type AppResponse struct {
 	Truncated      bool
 }
 
-// IsSyncFamily reports whether a verb is one of the zone-data verbs whose
+// isSyncFamily reports whether a verb is one of the zone-data verbs whose
 // application-level rejection the sender treats as a retryable failure
 // (the pre-C2 DNSTransport.Sync contract).
-func IsSyncFamily(token string) bool {
+func isSyncFamily(token string) bool {
 	switch token {
 	case "sync", "update", "rfi":
 		return true
@@ -147,7 +147,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 	finalPayload := payload
 	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payload)
 		if err != nil {
 			return NewTransportError("DNS", opType, peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
@@ -174,7 +174,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 		return NewTransportError("DNS", opType, peer.ID,
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
-	peer.Stats.RecordMessageSent(opType)
+	peer.Stats.recordMessageSent(opType)
 	return nil
 }
 
@@ -187,7 +187,7 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	if msg == nil || msg.TypeToken == "" {
 		return nil, NewTransportError("API", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)
 	}
-	if !IsSyncFamily(msg.TypeToken) {
+	if !isSyncFamily(msg.TypeToken) {
 		// Retryable: the verb exists, only this mechanism cannot carry it
 		// to every receiver in the field (older ones accept the sync
 		// family only on /msg), so TransportManager.Send may fall back to

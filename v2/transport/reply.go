@@ -62,12 +62,12 @@ func replyMiddleware(sink ReplySink) MiddlewareFunc {
 		}
 
 		// An explicit rcode (set by the default handler, etc.) wins
-		if rc, ok := ctx.ResponseRcode(); ok {
+		if rc, ok := ctx.responseRcode(); ok {
 			rcode = rc
 		}
 
 		// The handler's own response payload (the inline confirmation)
-		if payload, ok := ctx.ResponsePayload(); ok {
+		if payload, ok := ctx.responsePayload(); ok {
 			return sink.Reply(ctx, payload, rcode)
 		}
 

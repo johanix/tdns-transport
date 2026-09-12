@@ -180,7 +180,7 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 
 	ack := reply.accepted()
 	if ack {
-		peer.RecordMechanismBeatSent("API")
+		peer.recordMechanismBeatSent("API")
 	}
 
 	return &BeatResponse{

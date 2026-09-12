@@ -39,7 +39,7 @@ type MessageContext struct {
 	// ChunkPayload (EnvelopeNone once the receive path has decrypted it);
 	// EnvelopeUnknown when no label was recorded, in which case readers
 	// fall back to sniffing the bytes. The label as received is kept
-	// separately (WireEnvelope).
+	// separately (wireEnvelope).
 	ChunkEnvelope uint8
 
 	// Peer information. PeerID is the sender named in the query name,

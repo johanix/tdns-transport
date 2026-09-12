@@ -160,7 +160,7 @@ func TestCryptoSeam_CapturedDecrypts(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWireStructure(t, wire, "b.example.")
-	plain, err := receiver.UnwrapIncomingFromPeerEnvelope(wire, "a.example.", EnvelopeJOSE)
+	plain, err := receiver.unwrapIncomingFromPeerEnvelope(wire, "a.example.", EnvelopeJOSE)
 	if err != nil {
 		t.Fatalf("captured ciphertext through the current path: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestCryptoSeam_FreshDecryptsLegacy(t *testing.T) {
 	_ = aPriv
 	_ = bPub
 	sender, receiver := seamPair(t)
-	wire, err := sender.WrapOutgoing("b.example.", []byte(seamPlaintext))
+	wire, err := sender.wrapOutgoing("b.example.", []byte(seamPlaintext))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,12 +185,12 @@ func TestCryptoSeam_FreshDecryptsLegacy(t *testing.T) {
 		t.Fatalf("legacy algorithm: plaintext %q", got)
 	}
 	// and through the current path, for good measure
-	plain, err := receiver.UnwrapIncomingFromPeerEnvelope(wire, "a.example.", EnvelopeJOSE)
+	plain, err := receiver.unwrapIncomingFromPeerEnvelope(wire, "a.example.", EnvelopeJOSE)
 	if err != nil || string(plain) != seamPlaintext {
 		t.Fatalf("current path: %q %v", plain, err)
 	}
 	// the wrong sender's key must not verify
-	if _, err := receiver.UnwrapIncomingFromPeerEnvelope(wire, "b.example.", EnvelopeJOSE); err == nil {
+	if _, err := receiver.unwrapIncomingFromPeerEnvelope(wire, "b.example.", EnvelopeJOSE); err == nil {
 		t.Fatal("verified with the wrong peer's key")
 	}
 }

@@ -71,7 +71,7 @@ type ChunkNotifyHandler struct {
 		zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
 
 	// GossipForPeer returns serialized gossip data for a given peer.
-	// Used by HandleBeat to include gossip in beat responses.
+	// Used by handleBeat to include gossip in beat responses.
 	GossipForPeer func(peerID string) json.RawMessage
 
 	// ParseApp is the application's payload parser, and it is required.
@@ -211,7 +211,7 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 
 	// Phase 1: Fetch manifest (sequence 0)
 	manifestQname := buildChunkQueryQnameWithSeq(0, baseQname)
-	manifestChunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, manifestQname)
+	manifestChunk, err := h.Transport.fetchChunkRR(ctx, queryTarget, manifestQname)
 	if err != nil {
 		return nil, EnvelopeUnknown, fmt.Errorf("failed to fetch manifest (seq 0): %w", err)
 	}
@@ -231,7 +231,7 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	dataChunks := make([]*core.CHUNK, 0, manifestData.ChunkCount)
 	for i := uint16(1); i <= manifestData.ChunkCount; i++ {
 		chunkQname := buildChunkQueryQnameWithSeq(i, baseQname)
-		chunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, chunkQname)
+		chunk, err := h.Transport.fetchChunkRR(ctx, queryTarget, chunkQname)
 		if err != nil {
 			return nil, EnvelopeUnknown, fmt.Errorf("failed to fetch chunk %d/%d: %w", i, manifestData.ChunkCount, err)
 		}
@@ -288,7 +288,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 	// Sending an unencrypted response when encryption is expected would leak information.
 	var payloadFormat uint8 = EnvelopeNone
 	if h.SecureWrapper != nil && h.SecureWrapper.IsEnabled() && senderID != "" {
-		encrypted, encErr := h.SecureWrapper.WrapOutgoing(senderID, payloadBytes)
+		encrypted, encErr := h.SecureWrapper.wrapOutgoing(senderID, payloadBytes)
 		if encErr != nil {
 			lgTransport().Error("confirm response encryption failed, refusing to send plaintext", "peer", senderID, "err", encErr)
 			return h.sendResponse(w, req, dns.RcodeServerFailure)
@@ -309,19 +309,19 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 	return w.WriteMsg(resp)
 }
 
-// CreateNotifyHandlerFunc creates a function compatible with tdns.NotifyHandlerFunc.
+// createNotifyHandlerFunc creates a function compatible with tdns.NotifyHandlerFunc.
 // This is a helper that wraps RouteViaRouter for use with tdns.RegisterNotifyHandler.
 //
 // Usage in agent initialization:
 //
 //	handler := transport.NewChunkNotifyHandler(controlZone, localID, dnsTransport)
-//	handlerFunc := handler.CreateNotifyHandlerFunc()
+//	handlerFunc := handler.createNotifyHandlerFunc()
 //	tdns.RegisterNotifyHandler(core.TypeCHUNK, handlerFunc)
 //
 // Note: The returned function adapts to the tdns.NotifyHandlerFunc signature:
 //
 //	func(ctx context.Context, req *tdns.DnsNotifyRequest) error
-func (h *ChunkNotifyHandler) CreateNotifyHandlerFunc() interface{} {
+func (h *ChunkNotifyHandler) createNotifyHandlerFunc() interface{} {
 	// Return a closure that can be type-asserted to the correct signature
 	// in the calling code that has access to tdns types
 	return func(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
@@ -329,9 +329,9 @@ func (h *ChunkNotifyHandler) CreateNotifyHandlerFunc() interface{} {
 	}
 }
 
-// UnsolicitedMessageCount returns the number of rejected messages from unauthorized senders.
+// unsolicitedMessageCount returns the number of rejected messages from unauthorized senders.
 // This counter is used for DoS attack monitoring and should be exported via metrics/monitoring.
-func (h *ChunkNotifyHandler) UnsolicitedMessageCount() uint64 {
+func (h *ChunkNotifyHandler) unsolicitedMessageCount() uint64 {
 	return atomic.LoadUint64(&h.unsolicitedCount)
 }
 
@@ -409,7 +409,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	if h.SecureWrapper != nil {
 		lgTransport().Debug("attempting to decrypt payload", "source", sourceAddr, "key_for", senderHint)
 
-		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeerEnvelope(payload, senderHint, envelope)
+		decrypted, err := h.SecureWrapper.unwrapIncomingFromPeerEnvelope(payload, senderHint, envelope)
 		if err != nil {
 			// H5: Use sentinel error instead of string matching
 			if errors.Is(err, ErrNoVerificationKey) {
@@ -543,30 +543,30 @@ func (h *ChunkNotifyHandler) route(ctx context.Context, in routeInput, sink Repl
 	msgCtx.RemoteAddr = in.sourceAddr
 	// The payload is plaintext now. The label as received is kept for the record.
 	msgCtx.ChunkEnvelope = EnvelopeNone
-	msgCtx.SetWireEnvelope(in.envelope)
+	msgCtx.setWireEnvelope(in.envelope)
 	// Local identity, so handlers (e.g. ping) can include it in responses
-	msgCtx.SetLocalID(h.LocalID)
+	msgCtx.setLocalID(h.LocalID)
 	// Transport, for confirmation handling
 	if h.Transport != nil {
-		msgCtx.SetDNSTransport(h.Transport)
+		msgCtx.setDNSTransport(h.Transport)
 	}
 	// SecureWrapper + peer ID, so the DNS reply can encrypt the response;
 	// the HTTPS mechanism carries no payload crypto.
 	if h.SecureWrapper != nil && in.mechanism == MechanismDNS {
 		msgCtx.SetSecureWrapper(h.SecureWrapper)
 	}
-	msgCtx.SetResponsePeerID(senderHint)
+	msgCtx.setResponsePeerID(senderHint)
 	if h.OnConfirmationReceived != nil {
-		msgCtx.SetConfirmationCallback(h.OnConfirmationReceived)
+		msgCtx.setConfirmationCallback(h.OnConfirmationReceived)
 	}
 	if h.GossipForPeer != nil {
-		msgCtx.SetGossipForPeer(h.GossipForPeer)
+		msgCtx.setGossipForPeer(h.GossipForPeer)
 	}
 	// The parsed message, so handlers don't need to re-parse
 	msgCtx.SetIncoming(incomingMsg)
 	// The zone, for the zone-peer authorization below
 	if incomingMsg.Zone != "" {
-		msgCtx.SetZone(incomingMsg.Zone)
+		msgCtx.setZone(incomingMsg.Zone)
 		lgTransport().Debug("extracted zone for authorization", "zone", incomingMsg.Zone)
 	} else if msgType == MessageType(VerbBeat) {
 		// For beat messages, extract zones from the Zones array
@@ -576,7 +576,7 @@ func (h *ChunkNotifyHandler) route(ctx context.Context, in routeInput, sink Repl
 		// M11: payload is wire-sourced (bounded by message size), safe to unmarshal without size limit
 		if err := json.Unmarshal(in.payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
 			// Use first shared zone for authorization
-			msgCtx.SetZone(beatPayload.Zones[0])
+			msgCtx.setZone(beatPayload.Zones[0])
 			lgTransport().Debug("extracted zone from beat for authorization", "zone", beatPayload.Zones[0])
 		}
 	}

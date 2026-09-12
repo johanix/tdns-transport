@@ -38,9 +38,9 @@ type MemChunkStore struct {
 	ttl         time.Duration
 }
 
-// NewMemChunkStore creates a store whose entries expire after ttl
+// newMemChunkStore creates a store whose entries expire after ttl
 // (5 minutes when ttl is not positive).
-func NewMemChunkStore(ttl time.Duration) *MemChunkStore {
+func newMemChunkStore(ttl time.Duration) *MemChunkStore {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}

@@ -112,20 +112,20 @@ func (pc *PayloadCrypto) AddPeerVerificationKey(peerID string, pubKey crypto.Pub
 	pc.PeerVerificationKeys[dns.Fqdn(peerID)] = pubKey
 }
 
-// GetPeerKey retrieves a peer's public key for encryption.
-func (pc *PayloadCrypto) GetPeerKey(peerID string) (crypto.PublicKey, bool) {
+// getPeerKey retrieves a peer's public key for encryption.
+func (pc *PayloadCrypto) getPeerKey(peerID string) (crypto.PublicKey, bool) {
 	key, exists := pc.PeerKeys[dns.Fqdn(peerID)]
 	return key, exists
 }
 
-// GetPeerVerificationKey retrieves a peer's public key for signature verification.
-func (pc *PayloadCrypto) GetPeerVerificationKey(peerID string) (crypto.PublicKey, bool) {
+// getPeerVerificationKey retrieves a peer's public key for signature verification.
+func (pc *PayloadCrypto) getPeerVerificationKey(peerID string) (crypto.PublicKey, bool) {
 	key, exists := pc.PeerVerificationKeys[dns.Fqdn(peerID)]
 	return key, exists
 }
 
-// PeerVerificationKeyIDs returns the list of peer IDs we have verification keys for (for try-decrypt on incoming).
-func (pc *PayloadCrypto) PeerVerificationKeyIDs() []string {
+// peerVerificationKeyIDs returns the list of peer IDs we have verification keys for (for try-decrypt on incoming).
+func (pc *PayloadCrypto) peerVerificationKeyIDs() []string {
 	ids := make([]string, 0, len(pc.PeerVerificationKeys))
 	for id := range pc.PeerVerificationKeys {
 		ids = append(ids, id)
@@ -133,19 +133,19 @@ func (pc *PayloadCrypto) PeerVerificationKeyIDs() []string {
 	return ids
 }
 
-// Envelope returns the label of what EncryptAndSignPayload produces: the
+// Envelope returns the label of what encryptAndSignPayload produces: the
 // backend's envelope, which is what the CHUNK Format byte carries for an
 // encrypted payload.
 func (pc *PayloadCrypto) Envelope() uint8 {
 	return uint8(pc.Backend.Envelope())
 }
 
-// EncryptAndSignPayload produces the wire form of a payload for a peer:
+// encryptAndSignPayload produces the wire form of a payload for a peer:
 // the backend's envelope (for JOSE, JWS(JWE(payload))) under an outer
 // standard-base64 layer. The outer layer is part of the wire and stays
 // whatever the backend; a receiver strips it before it asks the backend.
 // If encryption is disabled, returns the original payload as-is.
-func (pc *PayloadCrypto) EncryptAndSignPayload(peerID string, payload []byte, metadata map[string]interface{}) ([]byte, error) {
+func (pc *PayloadCrypto) encryptAndSignPayload(peerID string, payload []byte, metadata map[string]interface{}) ([]byte, error) {
 	if !pc.Enabled {
 		return payload, nil
 	}
@@ -175,11 +175,11 @@ func (pc *PayloadCrypto) EncryptAndSignPayload(peerID string, payload []byte, me
 	return []byte(base64.StdEncoding.EncodeToString(envelope)), nil
 }
 
-// DecryptAndVerifyPayload is the inverse of EncryptAndSignPayload for a
+// decryptAndVerifyPayload is the inverse of encryptAndSignPayload for a
 // payload from the named peer: strips the outer standard-base64 layer,
 // then has the backend verify with the peer's key and decrypt with ours.
 // If encryption is disabled, returns the original payload as-is.
-func (pc *PayloadCrypto) DecryptAndVerifyPayload(peerID string, encodedPayload []byte) ([]byte, error) {
+func (pc *PayloadCrypto) decryptAndVerifyPayload(peerID string, encodedPayload []byte) ([]byte, error) {
 	if !pc.Enabled {
 		return encodedPayload, nil
 	}
@@ -206,11 +206,11 @@ func (pc *PayloadCrypto) DecryptAndVerifyPayload(peerID string, encodedPayload [
 	return plaintext, nil
 }
 
-// IsPayloadEncrypted checks if a payload appears to be encrypted (base64-encoded).
+// isPayloadEncrypted checks if a payload appears to be encrypted (base64-encoded).
 // This is a heuristic check - encrypted payloads won't start with '{' after decode attempt.
 // Legacy: the receive path reads the envelope label instead (see
 // envelope.go); this sniff remains for payloads that carry no label.
-func IsPayloadEncrypted(payload []byte) bool {
+func isPayloadEncrypted(payload []byte) bool {
 	// Try to parse as JSON first - if it works, it's not encrypted
 	var test interface{}
 	if err := json.Unmarshal(payload, &test); err == nil {
@@ -242,10 +242,10 @@ func NewSecurePayloadWrapper(crypto *PayloadCrypto) *SecurePayloadWrapper {
 	return &SecurePayloadWrapper{crypto: crypto}
 }
 
-// WrapOutgoing prepares an outgoing payload for a specific peer.
+// wrapOutgoing prepares an outgoing payload for a specific peer.
 // If encryption is enabled, returns encrypted and signed payload.
 // Otherwise returns the original payload.
-func (w *SecurePayloadWrapper) WrapOutgoing(peerID string, payload []byte) ([]byte, error) {
+func (w *SecurePayloadWrapper) wrapOutgoing(peerID string, payload []byte) ([]byte, error) {
 	if w.crypto == nil || !w.crypto.Enabled {
 		return payload, nil
 	}
@@ -255,7 +255,7 @@ func (w *SecurePayloadWrapper) WrapOutgoing(peerID string, payload []byte) ([]by
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	}
 
-	encrypted, err := w.crypto.EncryptAndSignPayload(peerID, payload, metadata)
+	encrypted, err := w.crypto.encryptAndSignPayload(peerID, payload, metadata)
 	if err != nil {
 		lgCrypto().Error("encryption failed", "peer", peerID, "err", err)
 		return nil, err
@@ -264,21 +264,21 @@ func (w *SecurePayloadWrapper) WrapOutgoing(peerID string, payload []byte) ([]by
 	return encrypted, nil
 }
 
-// UnwrapIncoming processes an incoming payload from a specific peer.
+// unwrapIncoming processes an incoming payload from a specific peer.
 // If encryption is enabled, verifies and decrypts the payload.
 // Otherwise returns the original payload.
-func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]byte, error) {
+func (w *SecurePayloadWrapper) unwrapIncoming(peerID string, payload []byte) ([]byte, error) {
 	if w.crypto == nil || !w.crypto.Enabled {
 		return payload, nil
 	}
 
 	// Check if payload is encrypted
-	if !IsPayloadEncrypted(payload) {
+	if !isPayloadEncrypted(payload) {
 		lgCrypto().Warn("received unencrypted payload when encryption is enabled, rejecting", "peer", peerID)
 		return nil, fmt.Errorf("received unencrypted payload from peer %s when encryption is mandatory", peerID)
 	}
 
-	decrypted, err := w.crypto.DecryptAndVerifyPayload(peerID, payload)
+	decrypted, err := w.crypto.decryptAndVerifyPayload(peerID, payload)
 	if err != nil {
 		lgCrypto().Error("decryption failed", "peer", peerID, "err", err)
 		return nil, err
@@ -287,16 +287,16 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 	return decrypted, nil
 }
 
-// UnwrapIncomingFromPeerEnvelope is UnwrapIncomingFromPeer driven by the
+// unwrapIncomingFromPeerEnvelope is unwrapIncomingFromPeer driven by the
 // payload's envelope label instead of a byte-sniff. EnvelopeNone returns the
 // payload as it is (what the sniff concluded for plain JSON until now);
 // EnvelopeJOSE requires payload crypto and the named peer's verification
 // key, and decrypts with that key only; EnvelopeUnknown keeps the legacy
 // sniffing behaviour for a payload that arrived without a label.
-func (w *SecurePayloadWrapper) UnwrapIncomingFromPeerEnvelope(payload []byte, requiredPeerID string, envelope uint8) ([]byte, error) {
+func (w *SecurePayloadWrapper) unwrapIncomingFromPeerEnvelope(payload []byte, requiredPeerID string, envelope uint8) ([]byte, error) {
 	switch envelope {
 	case EnvelopeUnknown:
-		return w.UnwrapIncomingFromPeer(payload, requiredPeerID)
+		return w.unwrapIncomingFromPeer(payload, requiredPeerID)
 	case EnvelopeNone:
 		return payload, nil
 	case EnvelopeJOSE:
@@ -306,7 +306,7 @@ func (w *SecurePayloadWrapper) UnwrapIncomingFromPeerEnvelope(payload []byte, re
 		if _, exists := w.crypto.PeerVerificationKeys[dns.Fqdn(requiredPeerID)]; !exists {
 			return nil, fmt.Errorf("%w: peer %s", ErrNoVerificationKey, requiredPeerID)
 		}
-		decrypted, err := w.crypto.DecryptAndVerifyPayload(requiredPeerID, payload)
+		decrypted, err := w.crypto.decryptAndVerifyPayload(requiredPeerID, payload)
 		if err != nil {
 			return nil, fmt.Errorf("decryption failed for required peer %s: %w", requiredPeerID, err)
 		}
@@ -320,7 +320,7 @@ func (w *SecurePayloadWrapper) IsEnabled() bool {
 	return w.crypto != nil && w.crypto.Enabled
 }
 
-// Envelope returns the label of what WrapOutgoing produces; EnvelopeNone
+// Envelope returns the label of what wrapOutgoing produces; EnvelopeNone
 // when encryption is not enabled.
 func (w *SecurePayloadWrapper) Envelope() uint8 {
 	if !w.IsEnabled() {
@@ -335,7 +335,7 @@ func (w *SecurePayloadWrapper) GetCrypto() *PayloadCrypto {
 	return w.crypto
 }
 
-// UnwrapIncomingFromPeer decrypts an incoming payload using ONLY the specified peer's verification key.
+// unwrapIncomingFromPeer decrypts an incoming payload using ONLY the specified peer's verification key.
 // This is the secure version that prevents DoS attacks via QNAME forgery.
 //
 // Use this function when:
@@ -354,11 +354,11 @@ func (w *SecurePayloadWrapper) GetCrypto() *PayloadCrypto {
 // Returns:
 //   - decrypted: The decrypted plaintext payload
 //   - error: Non-nil if decryption fails or peer not found
-func (w *SecurePayloadWrapper) UnwrapIncomingFromPeer(payload []byte, requiredPeerID string) ([]byte, error) {
+func (w *SecurePayloadWrapper) unwrapIncomingFromPeer(payload []byte, requiredPeerID string) ([]byte, error) {
 	if w.crypto == nil || !w.crypto.Enabled {
 		return payload, nil
 	}
-	if !IsPayloadEncrypted(payload) {
+	if !isPayloadEncrypted(payload) {
 		return payload, nil
 	}
 
@@ -369,7 +369,7 @@ func (w *SecurePayloadWrapper) UnwrapIncomingFromPeer(payload []byte, requiredPe
 	}
 
 	// Attempt decryption with ONLY the required peer's key
-	decrypted, err := w.crypto.DecryptAndVerifyPayload(requiredPeerID, payload)
+	decrypted, err := w.crypto.decryptAndVerifyPayload(requiredPeerID, payload)
 	if err != nil {
 		return nil, fmt.Errorf("decryption failed for required peer %s: %w", requiredPeerID, err)
 	}

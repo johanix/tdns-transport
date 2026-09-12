@@ -39,7 +39,7 @@ func TestRouteToCallback_skipsUnhandled(t *testing.T) {
 // A transport-own handler needs the parsed message the pipeline stores; a
 // router entered without one is misused and says so.
 func TestTransportOwnHandlersNeedParsedMessage(t *testing.T) {
-	for name, h := range map[string]MessageHandlerFunc{"hello": HandleHello, "beat": HandleBeat} {
+	for name, h := range map[string]MessageHandlerFunc{"hello": handleHello, "beat": handleBeat} {
 		ctx := NewMessageContext(nil, "127.0.0.1:0")
 		ctx.ChunkPayload = []byte(`{"MessageType":"` + name + `","MyIdentity":"a."}`)
 		if err := h(ctx); err == nil {
@@ -49,7 +49,7 @@ func TestTransportOwnHandlersNeedParsedMessage(t *testing.T) {
 		if err := h(ctx); err != nil {
 			t.Errorf("%s: handler with a parsed message: %v", name, err)
 		}
-		if got, _ := ctx.HandledType(); got != name {
+		if got, _ := ctx.handledType(); got != name {
 			t.Errorf("%s: handled type = %q", name, got)
 		}
 	}

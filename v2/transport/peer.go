@@ -114,7 +114,7 @@ type Peer struct {
 	// transport.Peer owns ALL per-peer connection+crypto state). Keys:
 	// "API", "DNS". Access ONLY via the MechanismTLSA/JWK/KeyRR accessors
 	// (they hold p.mu); lazily allocated.
-	mechanismCrypto map[string]*MechanismCrypto
+	mechanismCrypto map[string]*mechanismCrypto
 }
 
 // MechanismState tracks per-mechanism (e.g. "API", "DNS") state for a
@@ -142,14 +142,14 @@ type MechanismState struct {
 	ContactInfo string
 }
 
-// MechanismCrypto is the per-mechanism cryptographic material discovered for
+// mechanismCrypto is the per-mechanism cryptographic material discovered for
 // a peer: the TLSA record backing API mTLS verification, and the JWK / legacy
 // KEY material backing DNS payload crypto. Phase 2.5: moved here from
 // tdns-mp's transitional agentMeta sidecar (the addendum's deferred "E1
 // crypto move") — transport.Peer is the sole per-peer state owner. The RR
 // pointers are treated as immutable once set (discovery replaces, never
 // mutates in place).
-type MechanismCrypto struct {
+type mechanismCrypto struct {
 	KeyRR        *dns.KEY  // SIG(0) KEY record (DNS legacy fallback)
 	TlsaRR       *dns.TLSA // TLSA record (API mTLS verification)
 	JWKData      string    // JWK JSON (DNS payload crypto)
@@ -359,13 +359,13 @@ func (p *Peer) SetMechanismState(name string, state PeerState, reason string) {
 
 // ensureMechanismCryptoLocked returns the crypto entry for the named
 // mechanism, allocating map + entry lazily. Caller MUST hold p.mu.
-func (p *Peer) ensureMechanismCryptoLocked(name string) *MechanismCrypto {
+func (p *Peer) ensureMechanismCryptoLocked(name string) *mechanismCrypto {
 	if p.mechanismCrypto == nil {
-		p.mechanismCrypto = make(map[string]*MechanismCrypto)
+		p.mechanismCrypto = make(map[string]*mechanismCrypto)
 	}
 	c, ok := p.mechanismCrypto[name]
 	if !ok || c == nil {
-		c = &MechanismCrypto{}
+		c = &mechanismCrypto{}
 		p.mechanismCrypto[name] = c
 	}
 	return c
@@ -521,7 +521,7 @@ func (p *Peer) MechanismContactInfo(name string) string {
 
 // MechanismBeatSequence returns the count of beats successfully sent on
 // the named mechanism, or 0 if the mechanism is unknown. Maintained by
-// RecordMechanismBeatSent on the transport's own Beat() success path.
+// recordMechanismBeatSent on the transport's own Beat() success path.
 func (p *Peer) MechanismBeatSequence(name string) uint64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -579,8 +579,8 @@ func (p *Peer) SetState(state PeerState, reason string) {
 	p.StateChanged = time.Now()
 }
 
-// RecordMessageSent records statistics for an outgoing message.
-func (ms *MessageStats) RecordMessageSent(msgType string) {
+// recordMessageSent records statistics for an outgoing message.
+func (ms *MessageStats) recordMessageSent(msgType string) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
@@ -603,8 +603,8 @@ func (ms *MessageStats) RecordMessageSent(msgType string) {
 	}
 }
 
-// RecordMessageReceived records statistics for an incoming message.
-func (ms *MessageStats) RecordMessageReceived(msgType string) {
+// recordMessageReceived records statistics for an incoming message.
+func (ms *MessageStats) recordMessageReceived(msgType string) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
@@ -721,20 +721,20 @@ func (p *Peer) SetOperationalAddress(addr *Address) {
 	p.OperationalAddr = addr
 }
 
-// RecordBeatSent records that a beat was sent.
-func (p *Peer) RecordBeatSent() {
+// recordBeatSent records that a beat was sent.
+func (p *Peer) recordBeatSent() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.LastBeatSent = time.Now()
 	p.BeatSequence++
 }
 
-// RecordMechanismBeatSent records a successfully-sent beat on the named
+// recordMechanismBeatSent records a successfully-sent beat on the named
 // mechanism ("API"/"DNS"): it bumps the per-mechanism BeatSequence and
 // LastBeatSent and the top-level aggregate, and counts the send in Stats.
 // Called by the transport's own Beat() success path so BeatSequence/Stats
 // are maintained transport-internally (no MP write-back required).
-func (p *Peer) RecordMechanismBeatSent(name string) {
+func (p *Peer) recordMechanismBeatSent(name string) {
 	now := time.Now()
 	p.mu.Lock()
 	if p.Mechanisms == nil {
@@ -750,26 +750,26 @@ func (p *Peer) RecordMechanismBeatSent(name string) {
 	p.LastBeatSent = now
 	p.BeatSequence++
 	p.mu.Unlock()
-	p.Stats.RecordMessageSent("beat")
+	p.Stats.recordMessageSent("beat")
 }
 
-// RecordBeatReceived records that a beat was received.
-func (p *Peer) RecordBeatReceived() {
+// recordBeatReceived records that a beat was received.
+func (p *Peer) recordBeatReceived() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.LastBeatReceived = time.Now()
 	p.ConsecutiveFails = 0
 }
 
-// RecordFailure records a communication failure.
-func (p *Peer) RecordFailure() {
+// recordFailure records a communication failure.
+func (p *Peer) recordFailure() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ConsecutiveFails++
 }
 
-// IsHealthy returns true if the peer is in a healthy state.
-func (p *Peer) IsHealthy() bool {
+// isHealthy returns true if the peer is in a healthy state.
+func (p *Peer) isHealthy() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.State == PeerStateOperational || p.State == PeerStateDegraded
@@ -863,14 +863,14 @@ func (r *PeerRegistry) Count() int {
 	return len(r.peers)
 }
 
-// HealthyCount returns the number of healthy peers.
-func (r *PeerRegistry) HealthyCount() int {
+// healthyCount returns the number of healthy peers.
+func (r *PeerRegistry) healthyCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	count := 0
 	for _, peer := range r.peers {
-		if peer.IsHealthy() {
+		if peer.isHealthy() {
 			count++
 		}
 	}

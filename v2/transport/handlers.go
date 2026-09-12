@@ -34,7 +34,7 @@ func HandleConfirmation(ctx *MessageContext) error {
 
 	// Forward to transport's reliable message queue (marks distribution as confirmed).
 	if transport := ctx.DNSTransport(); transport != nil {
-		transport.HandleIncomingConfirmation(&IncomingConfirmation{
+		transport.handleIncomingConfirmation(&IncomingConfirmation{
 			DistributionID: confirm.DistributionID,
 			PeerID:         confirm.SenderID,
 			Status:         status,
@@ -60,28 +60,28 @@ func HandleConfirmation(ctx *MessageContext) error {
 	return nil
 }
 
-// HandlePing processes ping messages and sends immediate response.
-func HandlePing(ctx *MessageContext) error {
-	lgTransport().Info("HandlePing: enter", "peer", ctx.PeerID, "distrib", ctx.DistributionID,
-		"payload_len", len(ctx.ChunkPayload), "wire_envelope", EnvelopeString(ctx.WireEnvelope()))
+// handlePing processes ping messages and sends immediate response.
+func handlePing(ctx *MessageContext) error {
+	lgTransport().Info("handlePing: enter", "peer", ctx.PeerID, "distrib", ctx.DistributionID,
+		"payload_len", len(ctx.ChunkPayload), "wire_envelope", envelopeString(ctx.wireEnvelope()))
 
 	// Log the raw payload for debugging (truncate if long)
 	payloadStr := string(ctx.ChunkPayload)
 	if len(payloadStr) > 500 {
 		payloadStr = payloadStr[:500] + "..."
 	}
-	lgTransport().Debug("HandlePing: raw payload", "payload", payloadStr)
+	lgTransport().Debug("handlePing: raw payload", "payload", payloadStr)
 
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	incomingMsg, ok := ctx.Incoming()
 	if ok {
-		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Token(), "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
+		lgTransport().Debug("handlePing: pre-parsed message", "type", incomingMsg.Token(), "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
 		// Use pre-parsed message for type check
 		if incomingMsg.Token() != "ping" {
 			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Token())
 		}
 	} else {
-		lgTransport().Debug("HandlePing: no pre-parsed incoming_message in context")
+		lgTransport().Debug("handlePing: no pre-parsed incoming_message in context")
 	}
 
 	// Parse the ping message using DnsPingPayload (handles both standard and legacy field names)
@@ -90,7 +90,7 @@ func HandlePing(ctx *MessageContext) error {
 		return fmt.Errorf("failed to parse ping: %w (payload: %s)", err, payloadStr)
 	}
 
-	lgTransport().Debug("HandlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
+	lgTransport().Debug("handlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
 		"nonce", ping.Nonce, "sender", ping.SenderID, "myid", ping.MyIdentity)
 
 	if !ok && ping.Type != "ping" && ping.MessageType != "ping" {
@@ -127,8 +127,8 @@ func HandlePing(ctx *MessageContext) error {
 	return nil
 }
 
-// HandleHello processes hello messages for peer introduction.
-func HandleHello(ctx *MessageContext) error {
+// handleHello processes hello messages for peer introduction.
+func handleHello(ctx *MessageContext) error {
 	lgTransport().Debug("processing hello", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// The parsed message, stored by RouteViaRouter before the router was
@@ -150,10 +150,10 @@ func HandleHello(ctx *MessageContext) error {
 	return nil
 }
 
-// HandleBeat processes heartbeat messages.
+// handleBeat processes heartbeat messages.
 // Works for both agent and combiner — the confirm response is always constructed,
 // and the RouteToCallback middleware hands the message to the application for further processing.
-func HandleBeat(ctx *MessageContext) error {
+func handleBeat(ctx *MessageContext) error {
 	lgTransport().Debug("processing beat", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 	// The parsed message, stored by RouteViaRouter before the router was
@@ -203,13 +203,13 @@ func HandleBeat(ctx *MessageContext) error {
 	return nil
 }
 
-// DefaultUnsupportedHandler returns a handler for message types that have no
+// defaultUnsupportedHandler returns a handler for message types that have no
 // registered handler. Instead of returning an error (which causes SERVFAIL),
 // it sends a clean REFUSED response with an error payload explaining that the
 // message type is not supported.
-func DefaultUnsupportedHandler(ctx *MessageContext) error {
+func defaultUnsupportedHandler(ctx *MessageContext) error {
 	msgType := "unknown"
-	if mt, ok := ctx.UnhandledType(); ok {
+	if mt, ok := ctx.unhandledType(); ok {
 		msgType = mt
 	}
 
@@ -244,8 +244,8 @@ func DefaultUnsupportedHandler(ctx *MessageContext) error {
 // appropriate format byte.
 func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8) {
 	if sw := ctx.SecureWrapper(); sw != nil && sw.IsEnabled() {
-		if peerID := ctx.ResponsePeerID(); peerID != "" {
-			if encrypted, err := sw.WrapOutgoing(peerID, payload); err == nil {
+		if peerID := ctx.responsePeerID(); peerID != "" {
+			if encrypted, err := sw.wrapOutgoing(peerID, payload); err == nil {
 				return encrypted, sw.Envelope()
 			} else {
 				lgTransport().Error("response encryption failed", "peer", peerID, "err", err)
@@ -299,10 +299,10 @@ func RouteToCallback(fn func(*IncomingMessage)) MiddlewareFunc {
 		}
 
 		// A verb with no registered handler was answered REFUSED by
-		// DefaultUnsupportedHandler. It must not also be delivered to the
+		// defaultUnsupportedHandler. It must not also be delivered to the
 		// application: before this guard an agent processed an "update"
 		// it had just refused on the wire (C0.5 dispatch gate).
-		if _, unhandled := ctx.UnhandledType(); unhandled {
+		if _, unhandled := ctx.unhandledType(); unhandled {
 			return nil
 		}
 

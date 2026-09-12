@@ -38,7 +38,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	lgTransport().Info("registering handlers and middleware")
 
 	// Register default handler for unregistered message types
-	router.SetDefaultHandler(DefaultUnsupportedHandler)
+	router.SetDefaultHandler(defaultUnsupportedHandler)
 
 	// Global middleware, executed in order for every message. Outer
 	// middleware wraps inner middleware.
@@ -49,12 +49,12 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 			PeerRegistry: cfg.PeerRegistry,
 			Verbose:      cfg.VerboseStats,
 		}
-		router.Use(NewStatsMiddleware(statsCfg))
+		router.Use(newStatsMiddleware(statsCfg))
 		lgTransport().Info("registered statistics middleware")
 	}
 
 	// 2. Logging (for visibility)
-	router.Use(NewLoggingMiddleware(true))
+	router.Use(newLoggingMiddleware(true))
 	lgTransport().Info("registered logging middleware")
 
 	// Register the transport-own message handlers.
@@ -80,7 +80,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	err = router.Register(
 		"PingHandler",
 		MessageType(VerbPing),
-		HandlePing,
+		handlePing,
 		WithPriority(100),
 		WithDescription("Processes ping messages and sends immediate echo response"),
 	)
@@ -92,7 +92,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	err = router.Register(
 		"HelloHandler",
 		MessageType(VerbHello),
-		HandleHello,
+		handleHello,
 		WithPriority(100),
 		WithDescription("Processes Hello messages for peer introduction"),
 	)
@@ -104,7 +104,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	err = router.Register(
 		"BeatHandler",
 		MessageType(VerbBeat),
-		HandleBeat,
+		handleBeat,
 		WithPriority(100),
 		WithDescription("Processes heartbeat messages from peers"),
 	)

@@ -13,8 +13,8 @@
 
 package transport
 
-// NewLoggingMiddleware creates middleware for request/response logging.
-func NewLoggingMiddleware(verbose bool) MiddlewareFunc {
+// newLoggingMiddleware creates middleware for request/response logging.
+func newLoggingMiddleware(verbose bool) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		if verbose {
 			lgTransport().Debug("processing message", "source", ctx.RemoteAddr, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
@@ -34,9 +34,9 @@ func NewLoggingMiddleware(verbose bool) MiddlewareFunc {
 	}
 }
 
-// NewMetricsMiddleware creates middleware that counts handled messages
+// newMetricsMiddleware creates middleware that counts handled messages
 // through the given collector.
-func NewMetricsMiddleware(collector interface {
+func newMetricsMiddleware(collector interface {
 	RecordMetric(name string, value float64)
 }) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {

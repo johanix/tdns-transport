@@ -14,7 +14,7 @@ import (
 )
 
 func TestLoggingMiddleware(t *testing.T) {
-	middleware := NewLoggingMiddleware(false) // Non-verbose
+	middleware := newLoggingMiddleware(false) // Non-verbose
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
 	ctx.PeerID = "peer1"
 	ctx.DistributionID = "test-123"
@@ -37,7 +37,7 @@ func TestMetricsMiddleware(t *testing.T) {
 	metrics := make(map[string]float64)
 	collector := &mockMetricsCollector{metrics: metrics}
 
-	middleware := NewMetricsMiddleware(collector)
+	middleware := newMetricsMiddleware(collector)
 	ctx := NewMessageContext(&dns.Msg{}, "127.0.0.1:1234")
 
 	err := middleware(ctx, func(ctx *MessageContext) error {

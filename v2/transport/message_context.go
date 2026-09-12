@@ -60,8 +60,8 @@ func (ctx *MessageContext) SetResponsePayload(payload []byte) {
 	ctx.Data[ctxKeyResponse] = payload
 }
 
-// ResponsePayload returns the payload set by SetResponsePayload.
-func (ctx *MessageContext) ResponsePayload() ([]byte, bool) {
+// responsePayload returns the payload set by SetResponsePayload.
+func (ctx *MessageContext) responsePayload() ([]byte, bool) {
 	p, ok := ctx.Data[ctxKeyResponse].([]byte)
 	return p, ok
 }
@@ -73,8 +73,8 @@ func (ctx *MessageContext) SetResponseRcode(rcode int) {
 	ctx.Data[ctxKeyResponseRcode] = rcode
 }
 
-// ResponseRcode returns the override set by SetResponseRcode.
-func (ctx *MessageContext) ResponseRcode() (int, bool) {
+// responseRcode returns the override set by SetResponseRcode.
+func (ctx *MessageContext) responseRcode() (int, bool) {
 	rc, ok := ctx.Data[ctxKeyResponseRcode].(int)
 	return rc, ok
 }
@@ -86,8 +86,8 @@ func (ctx *MessageContext) LocalID() string {
 	return id
 }
 
-// SetLocalID records the receiving node's identity.
-func (ctx *MessageContext) SetLocalID(id string) {
+// setLocalID records the receiving node's identity.
+func (ctx *MessageContext) setLocalID(id string) {
 	ctx.Data[ctxKeyLocalID] = id
 }
 
@@ -98,19 +98,19 @@ func (ctx *MessageContext) Zone() string {
 	return z
 }
 
-// SetZone records the message's zone.
-func (ctx *MessageContext) SetZone(zone string) {
+// setZone records the message's zone.
+func (ctx *MessageContext) setZone(zone string) {
 	ctx.Data[ctxKeyZone] = zone
 }
 
-// ResponsePeerID is the identity the response is encrypted for.
-func (ctx *MessageContext) ResponsePeerID() string {
+// responsePeerID is the identity the response is encrypted for.
+func (ctx *MessageContext) responsePeerID() string {
 	id, _ := ctx.Data[ctxKeyResponsePeerID].(string)
 	return id
 }
 
-// SetResponsePeerID records the identity the response is encrypted for.
-func (ctx *MessageContext) SetResponsePeerID(id string) {
+// setResponsePeerID records the identity the response is encrypted for.
+func (ctx *MessageContext) setResponsePeerID(id string) {
 	ctx.Data[ctxKeyResponsePeerID] = id
 }
 
@@ -133,8 +133,8 @@ func (ctx *MessageContext) DNSTransport() *DNSTransport {
 	return t
 }
 
-// SetDNSTransport records the receiving node's DNS transport.
-func (ctx *MessageContext) SetDNSTransport(t *DNSTransport) {
+// setDNSTransport records the receiving node's DNS transport.
+func (ctx *MessageContext) setDNSTransport(t *DNSTransport) {
 	ctx.Data[ctxKeyTransport] = t
 }
 
@@ -144,8 +144,8 @@ func (ctx *MessageContext) ConfirmationCallback() ConfirmationCallback {
 	return cb
 }
 
-// SetConfirmationCallback records the application's confirmation consumer.
-func (ctx *MessageContext) SetConfirmationCallback(cb ConfirmationCallback) {
+// setConfirmationCallback records the application's confirmation consumer.
+func (ctx *MessageContext) setConfirmationCallback(cb ConfirmationCallback) {
 	ctx.Data[ctxKeyConfirmCallback] = cb
 }
 
@@ -156,21 +156,21 @@ func (ctx *MessageContext) GossipForPeer() GossipProvider {
 	return fn
 }
 
-// SetGossipForPeer records the application's gossip provider.
-func (ctx *MessageContext) SetGossipForPeer(fn GossipProvider) {
+// setGossipForPeer records the application's gossip provider.
+func (ctx *MessageContext) setGossipForPeer(fn GossipProvider) {
 	ctx.Data[ctxKeyGossipForPeer] = fn
 }
 
-// WireEnvelope is the envelope label the payload carried on the wire
+// wireEnvelope is the envelope label the payload carried on the wire
 // (ChunkEnvelope is the label of the payload as it is now, which after
 // decryption is EnvelopeNone).
-func (ctx *MessageContext) WireEnvelope() uint8 {
+func (ctx *MessageContext) wireEnvelope() uint8 {
 	e, _ := ctx.Data[ctxKeyWireEnvelope].(uint8)
 	return e
 }
 
-// SetWireEnvelope records the envelope label as received.
-func (ctx *MessageContext) SetWireEnvelope(e uint8) {
+// setWireEnvelope records the envelope label as received.
+func (ctx *MessageContext) setWireEnvelope(e uint8) {
 	ctx.Data[ctxKeyWireEnvelope] = e
 }
 
@@ -181,15 +181,15 @@ func (ctx *MessageContext) SetHandledType(verb string) {
 	ctx.Data[ctxKeyHandledType] = verb
 }
 
-// HandledType returns the verb recorded by SetHandledType.
-func (ctx *MessageContext) HandledType() (string, bool) {
+// handledType returns the verb recorded by SetHandledType.
+func (ctx *MessageContext) handledType() (string, bool) {
 	v, ok := ctx.Data[ctxKeyHandledType].(string)
 	return v, ok
 }
 
-// UnhandledType returns the verb the router found no handler for, when the
+// unhandledType returns the verb the router found no handler for, when the
 // default handler is running or has run.
-func (ctx *MessageContext) UnhandledType() (string, bool) {
+func (ctx *MessageContext) unhandledType() (string, bool) {
 	t, ok := ctx.Data[ctxKeyUnhandledType].(string)
 	return t, ok
 }
