@@ -86,11 +86,6 @@ type ChunkNotifyHandler struct {
 	// produce one returns an error (the sender gets FORMERR either way).
 	ParseApp func(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error)
 
-	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
-	// Used when Transport is nil (combiner/signer mode) for chunk_mode=query fallback.
-	// If nil and Transport is nil, query mode is not supported.
-	FetchChunkQuery func(ctx context.Context, serverAddr, qname string) ([]byte, error)
-
 	// unsolicitedCount tracks rejected messages from unauthorized senders (DoS mitigation)
 	// Use atomic operations to increment (accessed from multiple NOTIFY handler goroutines)
 	unsolicitedCount uint64
@@ -186,15 +181,12 @@ func extractChunkQueryEndpointFromMsg(msg *dns.Msg) string {
 // fetchChunkViaQuery fetches the CHUNK payload via DNS CHUNK query when NOTIFY had no EDNS0 payload (chunk_mode=query).
 // Uses manifest-first fetch: fetches manifest (sequence 0), checks if inline, otherwise fetches data chunks 1..N.
 // Builds base qname as {receiver}.{distid}.{sender} and queries the sender.
-// A query-mode payload arrives unlabelled (EnvelopeUnknown) and the
-// receiver falls back to sniffing it: the CHUNK records it came in carry
-// the splitter's format, not the payload's envelope (the manifest and data
-// chunks are stamped FormatJSON whatever the payload is), and the
-// application's FetchChunkQuery callback returns bytes only. Labelling this
-// path is F2b's job, when transport owns the whole chunk chain.
+// The payload's envelope label is in the manifest's metadata (F2b); a
+// manifest from a sender that predates it carries none, and the receiver
+// falls back to sniffing the bytes (EnvelopeUnknown).
 func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, distributionID string, msg *dns.Msg, w dns.ResponseWriter) ([]byte, uint8, error) {
-	if h.Transport == nil && h.FetchChunkQuery == nil {
-		return nil, EnvelopeUnknown, fmt.Errorf("no transport or FetchChunkQuery callback for CHUNK query")
+	if h.Transport == nil {
+		return nil, EnvelopeUnknown, fmt.Errorf("query mode needs a DNS transport to fetch the CHUNK records")
 	}
 	if senderID == "" {
 		return nil, EnvelopeUnknown, fmt.Errorf("cannot derive sender for query mode (empty senderID)")
@@ -218,12 +210,6 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	}
 
 	// Phase 1: Fetch manifest (sequence 0)
-	if h.Transport == nil {
-		// Combiner/signer fallback: no Transport, use legacy single-fetch callback
-		payload, err := h.FetchChunkQuery(ctx, queryTarget, baseQname)
-		return payload, EnvelopeUnknown, err
-	}
-
 	manifestQname := buildChunkQueryQnameWithSeq(0, baseQname)
 	manifestChunk, err := h.Transport.FetchChunkRR(ctx, queryTarget, manifestQname)
 	if err != nil {
@@ -235,9 +221,10 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	if err != nil {
 		return nil, EnvelopeUnknown, fmt.Errorf("failed to parse manifest: %w", err)
 	}
+	envelope := envelopeFromManifest(manifestData)
 	if manifestData.ChunkCount == 0 {
 		// Payload is inline in the manifest
-		return manifestData.Payload, EnvelopeUnknown, nil
+		return manifestData.Payload, envelope, nil
 	}
 
 	// Phase 3: Fetch data chunks 1..N and reassemble
@@ -254,7 +241,7 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	if err != nil {
 		return nil, EnvelopeUnknown, err
 	}
-	return payload, EnvelopeUnknown, nil
+	return payload, envelope, nil
 }
 
 // sendResponse sends a DNS response with the given rcode.

@@ -41,9 +41,10 @@ type TransportManagerConfig struct {
 	ChunkQueryEndpoint         string
 	ChunkQueryEndpointInNotify bool
 
-	// CHUNK query-mode payload store callbacks (nil disables query mode)
-	ChunkPayloadGet func(qname string) ([]byte, uint8, bool)
-	ChunkPayloadSet func(qname string, payload []byte, format uint8)
+	// ChunkStore for query mode; nil means the transport's own in-memory
+	// store. The application calls DNSTransport.ServeChunkQueries to
+	// answer for it.
+	ChunkStore ChunkStore
 
 	// Crypto
 	PayloadCrypto *PayloadCrypto
@@ -173,8 +174,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			Timeout:                    dnsTimeout,
 			PayloadCrypto:              cfg.PayloadCrypto,
 			ChunkMode:                  cfg.ChunkMode,
-			ChunkPayloadGet:            cfg.ChunkPayloadGet,
-			ChunkPayloadSet:            cfg.ChunkPayloadSet,
+			ChunkStore:                 cfg.ChunkStore,
 			ChunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 			ChunkMaxSize:               cfg.ChunkMaxSize,

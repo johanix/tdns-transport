@@ -54,11 +54,11 @@ type DNSTransport struct {
 	// SecureWrapper handles optional JWS/JWE encryption for payloads
 	SecureWrapper *SecurePayloadWrapper
 
-	// chunkMode: "edns0" or "query"; when "query", payload is stored and NOTIFY sent without EDNS0
-	chunkMode      string
-	chunkGet       func(qname string) ([]byte, uint8, bool)
-	chunkSet       func(qname string, payload []byte, format uint8)
-	chunkSetChunks func(qname string, chunks []*core.CHUNK)
+	// chunkMode: "edns0" or "query"; when "query", the payload's CHUNK
+	// records are kept in chunkStore and the NOTIFY is sent without an
+	// EDNS0 payload; the receiver fetches them (ServeChunkQueries answers).
+	chunkMode  string
+	chunkStore ChunkStore
 	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
@@ -119,11 +119,9 @@ type DNSTransportConfig struct {
 
 	// ChunkMode: "edns0" (default) = payload in EDNS0 option; "query" = store payload, send NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode string
-	// For ChunkMode "query": optional get/set for payload store (keyed by qname). If nil, query mode is effectively disabled.
-	// Format: FormatJSON=1, FormatJWT=2 (from core package)
-	ChunkPayloadGet       func(qname string) ([]byte, uint8, bool)
-	ChunkPayloadSet       func(qname string, payload []byte, format uint8)
-	ChunkPayloadSetChunks func(qname string, chunks []*core.CHUNK)
+	// ChunkStore holds the stored records in query mode; nil means an
+	// in-memory store with a five-minute TTL. Ignored in edns0 mode.
+	ChunkStore ChunkStore
 	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agents[].address)
@@ -153,9 +151,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		pendingConfirmations:       make(map[string]*pendingOperation),
 		ConfirmationChan:           make(chan *IncomingConfirmation, 100),
 		chunkMode:                  cfg.ChunkMode,
-		chunkGet:                   cfg.ChunkPayloadGet,
-		chunkSet:                   cfg.ChunkPayloadSet,
-		chunkSetChunks:             cfg.ChunkPayloadSetChunks,
+		chunkStore:                 cfg.ChunkStore,
 		chunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 		chunkMaxSize:               cfg.ChunkMaxSize,
@@ -168,7 +164,17 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		t.SecureWrapper = NewSecurePayloadWrapper(cfg.PayloadCrypto)
 	}
 
+	// Query mode keeps the records it will serve
+	if t.chunkMode == "query" && t.chunkStore == nil {
+		t.chunkStore = NewMemChunkStore(5 * time.Minute)
+	}
+
 	return t
+}
+
+// ChunkStore returns the store of query-mode records; nil in edns0 mode.
+func (t *DNSTransport) ChunkStore() ChunkStore {
+	return t.chunkStore
 }
 
 // Name returns the transport name for logging.
@@ -337,17 +343,18 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
+	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
 	if useQueryMode {
-		// Prepare manifest + data chunks via distrib framework
+		// Prepare manifest + data chunks; the manifest names the payload's envelope
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize,
+			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
 		if err != nil {
 			return nil, NewTransportError("DNS", "Ping", peer.ID,
 				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
 		}
-		t.chunkSetChunks(chunkQueryQname, allChunks)
+		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
 	}
 
 	m := new(dns.Msg)
@@ -555,17 +562,18 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
+	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
 	if useQueryMode {
-		// Prepare manifest + data chunks via distrib framework
+		// Prepare manifest + data chunks; the manifest names the payload's envelope
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize,
+			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
 		if err != nil {
 			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
 				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
 		}
-		t.chunkSetChunks(chunkQueryQname, allChunks)
+		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
 	}
 
 	// Create NOTIFY message
