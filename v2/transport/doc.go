@@ -1,67 +1,68 @@
 /*
-Package transport provides a unified interface for agent-to-agent communication
-in the multi-provider DNSSEC coordination (HSYNC) system.
+Package transport moves messages between the agents of a multi-provider DNS
+setup over two mechanisms, DNS and HTTPS, and knows nothing about what the
+messages mean.
 
-# Overview
+# Vocabulary
 
-The transport package abstracts the communication layer, allowing the HSYNC
-business logic to work identically regardless of whether agents communicate
-via HTTPS API or DNS NOTIFY/Query patterns.
+Transport's own verbs are hello, beat, ping and confirm, plus the chunk
+machinery that carries a payload. Everything the application says on top of
+that travels as one opaque carrier, AppMessage: a scope, a verb token and a
+payload transport never reads. The application registers a handler per verb
+on the router and installs the parser that reads its own payload
+conventions (ChunkNotifyHandler.ParseApp).
 
-# Transport Interface
+# Sending
 
-The Transport interface defines five core operations:
+TransportManager owns the mechanisms a node supports, selects one per peer
+and falls back to the other (Send), fans hello and beat out over every
+eligible mechanism (SendAll), and retries an application message through the
+ReliableMessageQueue until the receiver's inline confirmation clears it
+(Enqueue, MarkDeliveryConfirmed).
 
-  - Hello: Establishes identity and negotiates capabilities between agents
-  - Beat: Maintains the relationship through periodic heartbeats
-  - Sync: Synchronizes DNS data (NS, DNSKEY, GLUE, CDS, CSYNC records)
-  - Relocate: Requests use of a different address (DDoS mitigation)
-  - Confirm: Acknowledges receipt and processing of sync operations
+The DNS mechanism (DNSTransport) sends a NOTIFY for the CHUNK type with the
+payload in an EDNS0 CHUNK option, or in query mode serves the payload as
+CHUNK records the receiver fetches. The receiver's inline confirmation comes
+back in the NOTIFY response. The HTTPS mechanism (APITransport) posts JSON
+and carries hello, beat, ping, confirm and the sync family only.
 
-# Implementations
+# Receiving
 
-Two transport implementations are provided:
+ChunkNotifyHandler.RouteViaRouter is the receive pipeline for a NOTIFY(CHUNK).
+It is registered with tdns for the CHUNK type and, in this order: reads the
+distribution id and the sender from the query name; asks the application
+whether that sender may talk to this node at all, before any cryptography;
+fetches the payload from the EDNS0 option or by CHUNK query; checks the
+envelope label; verifies and decrypts with the named sender's key and no
+other; has the application parse the payload; asks the application again,
+now with the zone; and only then enters the router. The router runs the
+statistics and logging middleware and the verb's handler; the response
+wrapper sends the DNS response with the handler's inline confirmation; the
+callback wrapper hands the parsed message to the application.
 
-  - APITransport: Uses HTTPS REST API (current/working)
-  - DNSTransport: Uses DNS NOTIFY(CHUNK) + Query (Phase 3 stub)
+What the pipeline and the handlers exchange rides on MessageContext, through
+the typed accessors in message_context.go.
 
-# Zone-Specific Communication
+# Payload crypto
 
-All sync operations are zone-specific. An agent can only make statements about
-zones and data under its own control. This is a core security principle:
-agents speak only for themselves, not for other providers.
+PayloadCrypto holds the local key pair and the peers' keys and produces and
+consumes the wire form of an encrypted payload, base64(JWS(JWE(payload)))
+with the JOSE backend. The envelope label in the CHUNK Format byte tells a
+receiver how the bytes are wrapped (envelope.go). Backends implement
+crypto.Backend and register by name.
 
-# Peer Management
+# Peers and discovery
 
-The Peer struct tracks the state and addresses of remote agents:
+Peer carries a peer's identity, its per-mechanism address, state and keys,
+and its liveness; PeerRegistry holds them. Discovery (discovery.go, imr.go)
+resolves an identity's URI, SVCB, TLSA and JWK records through the tdns
+resolver and installs what it finds on the peer and in PayloadCrypto. The
+application decides when to discover; transport does the lookups.
 
-  - Discovery address: Found via DNS (URI/SVCB records)
-  - Operational address: Private address from Relocate (DDoS mitigation)
-  - State machine: NEEDED → KNOWN → INTRODUCING → OPERATIONAL
+# Consumers
 
-The PeerRegistry provides thread-safe management of all known peers.
-
-# Example Usage
-
-	// Create API transport
-	transport := NewAPITransport(&APITransportConfig{
-		LocalID:        "provider-a.example.com",
-		DefaultTimeout: 5 * time.Second,
-	})
-
-	// Create peer registry
-	registry := NewPeerRegistry()
-	peer := registry.GetOrCreate("provider-b.example.com")
-	peer.SetDiscoveryAddress(&Address{
-		Host:      "api.provider-b.example.com",
-		Port:      8443,
-		Transport: "https",
-	})
-
-	// Send hello
-	resp, err := transport.Hello(ctx, peer, &HelloRequest{
-		SenderID:    "provider-a.example.com",
-		SharedZones: []string{"example.com."},
-	})
+The multi-provider application in tdns-mp is the production consumer.
+cmd/transport-exercise drives the public surface without it and is the
+proof that a second consumer can.
 */
 package transport

@@ -223,10 +223,30 @@ func testCryptoBackend() bool {
 // key is refused. No network is touched.
 func testDiscovery() bool {
 	fmt.Println("--- Discovery ---")
+	// Payload crypto is what makes a verification key mandatory for a
+	// discovered DNS endpoint; a consumer without crypto accepts any
+	// endpoint. Exercise the documented contract: with crypto on.
+	backend, err := crypto.GetBackend("jose")
+	if err != nil {
+		fmt.Printf("  FAIL: get JOSE backend: %v\n", err)
+		return false
+	}
+	priv, pub, err := backend.GenerateKeypair()
+	if err != nil {
+		fmt.Printf("  FAIL: generate keypair: %v\n", err)
+		return false
+	}
+	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{Backend: backend, Enabled: true})
+	if err != nil {
+		fmt.Printf("  FAIL: payload crypto: %v\n", err)
+		return false
+	}
+	pc.SetLocalKeys(priv, pub)
 	tm := transport.NewTransportManager(&transport.TransportManagerConfig{
 		LocalID:             "exercise.example.",
 		ControlZone:         "mp-control.example.",
 		SupportedMechanisms: []string{"dns"},
+		PayloadCrypto:       pc,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -248,9 +268,9 @@ func testDiscovery() bool {
 	}
 	fmt.Println("  OK: known peer returned without discovery")
 
-	// A discovered endpoint without a verification key is refused (the
-	// receive path needs the key to decrypt), and the completion seam
-	// does not fire for it.
+	// A discovered DNS endpoint without a verification key is refused when
+	// payload crypto is on (the receive path needs the key to decrypt), and
+	// the completion seam does not fire for it.
 	fired := false
 	tm.OnPeerDiscovered = func(p *transport.Peer) { fired = true }
 	err = tm.RegisterDiscoveredPeer(&transport.DiscoveryResult{

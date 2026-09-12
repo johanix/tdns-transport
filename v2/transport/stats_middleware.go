@@ -22,7 +22,7 @@ type StatsMiddlewareConfig struct {
 //   - Last Used timestamp (updated on every message)
 //   - Total distribution counts
 //
-// The middleware runs AFTER authorization, so we know the peer is valid.
+// The peer was authorized by RouteViaRouter before the router was entered.
 func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		// Skip if no peer registry
@@ -41,7 +41,7 @@ func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 		// Determine message type from context
 		// The router has already parsed and validated the message type
 		msgType := ""
-		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
+		if incomingMsg, ok := ctx.Incoming(); ok {
 			msgType = incomingMsg.Type
 		}
 

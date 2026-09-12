@@ -109,16 +109,6 @@ func NewChunkNotifyHandler(controlZone, localID string, transport *DNSTransport)
 	return h
 }
 
-// DnsNotifyRequest mirrors the tdns.DnsNotifyRequest structure.
-// We define it here to avoid import cycles with the main tdns package.
-// The actual registration will use the real tdns.DnsNotifyRequest type.
-type DnsNotifyRequest struct {
-	ResponseWriter dns.ResponseWriter
-	Msg            *dns.Msg
-	Qname          string
-	// Options contains EDNS0 options - we'll extract CHUNK from raw message
-}
-
 // extractDistributionIDAndSender extracts the distribution ID and sender identity from a QNAME.
 // QNAME format: <distributionID>.<sender-identity> e.g. "6981284f.agent.alpha.dnslab."
 // The first label is the distribution ID; the rest is the sender's identity (FQDN).
@@ -540,34 +530,32 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	msgCtx.PeerID = senderHint
 	msgCtx.ChunkPayload = payload
 	msgCtx.RemoteAddr = sourceAddr
-	// Mark that we've already handled decryption (payload is now plaintext)
-	msgCtx.ChunkCrypted = false
+	// The payload is plaintext now: verified and decrypted above with the
+	// claimed sender's key. The label as received is kept for the record.
 	msgCtx.ChunkEnvelope = EnvelopeNone
-	msgCtx.Data["wire_envelope"] = envelope
-	msgCtx.SignatureValid = true // We verified during decryption above
-	msgCtx.SignatureReason = "decrypted_by_router"
-	// Store local identity so handlers (e.g. ping) can include it in responses
-	msgCtx.Data["local_id"] = h.LocalID
-	// Store transport for confirmation handling
+	msgCtx.SetWireEnvelope(envelope)
+	// Local identity, so handlers (e.g. ping) can include it in responses
+	msgCtx.SetLocalID(h.LocalID)
+	// Transport, for confirmation handling
 	if h.Transport != nil {
-		msgCtx.Data["transport"] = h.Transport
+		msgCtx.SetDNSTransport(h.Transport)
 	}
-	// Store SecureWrapper + peer ID so SendResponseMiddleware can encrypt responses
+	// SecureWrapper + peer ID, so SendResponseMiddleware can encrypt responses
 	if h.SecureWrapper != nil {
-		msgCtx.Data["secure_wrapper"] = h.SecureWrapper
+		msgCtx.SetSecureWrapper(h.SecureWrapper)
 	}
-	msgCtx.Data["response_peer_id"] = senderHint
+	msgCtx.SetResponsePeerID(senderHint)
 	if h.OnConfirmationReceived != nil {
-		msgCtx.Data["on_confirmation_received"] = h.OnConfirmationReceived
+		msgCtx.SetConfirmationCallback(h.OnConfirmationReceived)
 	}
 	if h.GossipForPeer != nil {
-		msgCtx.Data["gossip_for_peer"] = h.GossipForPeer
+		msgCtx.SetGossipForPeer(h.GossipForPeer)
 	}
-	// Store the parsed message so handlers don't need to re-parse
-	msgCtx.Data["incoming_message"] = incomingMsg
-	// Extract zone for authorization middleware (HSYNC check)
+	// The parsed message, so handlers don't need to re-parse
+	msgCtx.SetIncoming(incomingMsg)
+	// The zone, for the zone-peer authorization below
 	if incomingMsg.Zone != "" {
-		msgCtx.Data["zone"] = incomingMsg.Zone
+		msgCtx.SetZone(incomingMsg.Zone)
 		lgTransport().Debug("extracted zone for authorization", "zone", incomingMsg.Zone)
 	} else if msgType == MessageType("beat") {
 		// For beat messages, extract zones from the Zones array
@@ -578,7 +566,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		// M11: payload is DNS-sourced (bounded by wire size), safe to unmarshal without size limit
 		if err := json.Unmarshal(payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
 			// Use first shared zone for authorization
-			msgCtx.Data["zone"] = beatPayload.Zones[0]
+			msgCtx.SetZone(beatPayload.Zones[0])
 			lgTransport().Debug("extracted zone from beat for authorization", "zone", beatPayload.Zones[0])
 		}
 	}
@@ -587,13 +575,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	// verify that this peer is authorized for this specific zone. The pre-crypto check (H8 above)
 	// only verified the peer is known at all (zone=""); this check validates the zone-peer binding.
 	if h.IsPeerAuthorized != nil {
-		zone := ""
-		if zoneVal, ok := msgCtx.Data["zone"]; ok {
-			if zoneStr, ok := zoneVal.(string); ok {
-				zone = zoneStr
-			}
-		}
-		if zone != "" {
+		if zone := msgCtx.Zone(); zone != "" {
 			authorized, reason := h.IsPeerAuthorized(senderHint, zone)
 			if !authorized {
 				lgTransport().Warn("peer not authorized for zone", "peer", senderHint, "zone", zone, "reason", reason)
