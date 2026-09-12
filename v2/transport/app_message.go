@@ -52,17 +52,12 @@ type AppMessage struct {
 	FireAndForget bool
 }
 
-// Token returns the application verb of an incoming message: TypeToken
-// when set, else the legacy Type. Both carry the same value during
-// Stage C; TypeToken becomes the only one at C6.
+// Token returns the verb of an incoming message; "" for a nil message.
 func (m *IncomingMessage) Token() string {
 	if m == nil {
 		return ""
 	}
-	if m.TypeToken != "" {
-		return m.TypeToken
-	}
-	return m.Type
+	return m.TypeToken
 }
 
 // App returns the message as the opaque carrier.

@@ -42,7 +42,7 @@ func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 		// The router has already parsed and validated the message type
 		msgType := ""
 		if incomingMsg, ok := ctx.Incoming(); ok {
-			msgType = incomingMsg.Type
+			msgType = incomingMsg.Token()
 		}
 
 		// Record incoming message statistics

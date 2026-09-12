@@ -75,10 +75,10 @@ func HandlePing(ctx *MessageContext) error {
 	// Get the pre-parsed message from context (set by RouteViaRouter)
 	incomingMsg, ok := ctx.Incoming()
 	if ok {
-		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Type, "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
+		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Token(), "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
 		// Use pre-parsed message for type check
-		if incomingMsg.Type != "ping" {
-			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Type)
+		if incomingMsg.Token() != "ping" {
+			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Token())
 		}
 	} else {
 		lgTransport().Debug("HandlePing: no pre-parsed incoming_message in context")
@@ -131,18 +131,15 @@ func HandlePing(ctx *MessageContext) error {
 func HandleHello(ctx *MessageContext) error {
 	lgTransport().Debug("processing hello", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// The parsed message, stored by RouteViaRouter before the router was
+	// entered; a router entered without it is misused.
 	helloMsg, ok := ctx.Incoming()
 	if !ok {
-		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
-		helloMsg = ParseIncomingMessage(ctx.ChunkPayload)
-		if helloMsg == nil {
-			return fmt.Errorf("failed to parse hello payload")
-		}
+		return fmt.Errorf("hello handler: no parsed message in context")
 	}
 
-	if helloMsg.Type != "hello" {
-		return fmt.Errorf("invalid message type for hello handler: %s", helloMsg.Type)
+	if helloMsg.Token() != "hello" {
+		return fmt.Errorf("invalid message type for hello handler: %s", helloMsg.Token())
 	}
 
 	// Store for the callback to the application
@@ -159,18 +156,15 @@ func HandleHello(ctx *MessageContext) error {
 func HandleBeat(ctx *MessageContext) error {
 	lgTransport().Debug("processing beat", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by RouteViaRouter)
+	// The parsed message, stored by RouteViaRouter before the router was
+	// entered; a router entered without it is misused.
 	beatMsg, ok := ctx.Incoming()
 	if !ok {
-		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
-		beatMsg = ParseIncomingMessage(ctx.ChunkPayload)
-		if beatMsg == nil {
-			return fmt.Errorf("failed to parse beat payload")
-		}
+		return fmt.Errorf("beat handler: no parsed message in context")
 	}
 
-	if beatMsg.Type != "beat" {
-		return fmt.Errorf("invalid message type for beat handler: %s", beatMsg.Type)
+	if beatMsg.Token() != "beat" {
+		return fmt.Errorf("invalid message type for beat handler: %s", beatMsg.Token())
 	}
 
 	// Store for the callback to the application
@@ -207,46 +201,6 @@ func HandleBeat(ctx *MessageContext) error {
 
 	lgTransport().Debug("beat processed", "peer", ctx.PeerID)
 	return nil
-}
-
-// ParseIncomingMessage parses a raw JSON payload into an IncomingMessage.
-// Handles both standard format (MessageType/OriginatorID) and legacy format (type/sender_id).
-// Returns nil if parsing fails.
-func ParseIncomingMessage(payload []byte) *IncomingMessage {
-	var fields struct {
-		MessageType  string `json:"MessageType"`
-		Type         string `json:"type"`
-		OriginatorID string `json:"OriginatorID"` // Sync/update messages
-		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
-		SenderID     string `json:"sender_id"`
-		Zone         string `json:"Zone"`
-		LegacyZone   string `json:"zone"`
-	}
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return nil
-	}
-	msgType := fields.MessageType
-	if msgType == "" {
-		msgType = fields.Type
-	}
-	senderID := fields.OriginatorID
-	if senderID == "" {
-		senderID = fields.MyIdentity
-	}
-	if senderID == "" {
-		senderID = fields.SenderID
-	}
-	zone := fields.Zone
-	if zone == "" {
-		zone = fields.LegacyZone
-	}
-	return &IncomingMessage{
-		Type:      msgType,
-		TypeToken: msgType,
-		SenderID:  senderID,
-		Zone:      zone,
-		Payload:   payload,
-	}
 }
 
 // DefaultUnsupportedHandler returns a handler for message types that have no

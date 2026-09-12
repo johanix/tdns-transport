@@ -12,11 +12,12 @@ import (
 	"time"
 )
 
-// IncomingMessage represents a message received via DNS transport.
-// This is routed to the hsyncengine for processing.
+// IncomingMessage is a message received via the DNS mechanism, as the
+// application's parser (ChunkNotifyHandler.ParseApp) produced it. The
+// router keys on TypeToken; the callback hands the whole message to the
+// application.
 type IncomingMessage struct {
-	Type            string    // "hello", "beat", "ping", "sync", "update", "relocate", "confirm"
-	TypeToken       string    // C1: the application verb (== Type during Stage C; see Token())
+	TypeToken       string    // the verb: transport-own ("hello", "beat", "ping", "confirm") or the application's
 	DistributionID  string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
 	SenderID        string    // Sender identity (from payload OriginatorID — original author)
 	TransportSender string    // Transport-level sender (from QNAME — who actually sent the DNS NOTIFY)

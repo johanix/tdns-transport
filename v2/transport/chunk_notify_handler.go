@@ -74,11 +74,14 @@ type ChunkNotifyHandler struct {
 	// Used by HandleBeat to include gossip in beat responses.
 	GossipForPeer func(peerID string) json.RawMessage
 
-	// ParseApp is the application's payload parser (C5). After transport
-	// has fetched and decrypted the payload it calls ParseApp to obtain
-	// the verb (TypeToken), the application-level sender, the scope
-	// (zone) and the nonce; the field names inside the payload are the
-	// application's business. If nil, transport's built-in parser is used.
+	// ParseApp is the application's payload parser, and it is required.
+	// After transport has fetched and decrypted the payload it calls
+	// ParseApp to obtain the verb (TypeToken), the application-level
+	// sender, the scope (zone) and the nonce; the field names inside the
+	// payload are the application's business, transport has no parser of
+	// its own. Transport-own verbs (hello, beat, ping, confirm) arrive
+	// through the same parser, so it must at least read the verb and the
+	// sender identity; cmd/transport-exercise shows the minimum.
 	// Contract: a nil error means a non-nil message; a parser that cannot
 	// produce one returns an error (the sender gets FORMERR either way).
 	ParseApp func(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error)
@@ -254,72 +257,6 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 	return payload, EnvelopeUnknown, nil
 }
 
-// parsePayload parses the JSON payload to determine message type and content.
-// M11: The payload is bounded by DNS message size (max 65535 bytes for TCP, ~4096 for UDP)
-// or by the CHUNK query reassembly limit. No additional size limit is needed here because
-// the input is always sourced from DNS wire data, never from unbounded HTTP or file input.
-func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
-	var fields struct {
-		MessageType  string `json:"MessageType"`  // Standard format (string: "sync", "update", "beat", etc.)
-		Type         string `json:"type"`         // Legacy format (fallback)
-		OriginatorID string `json:"OriginatorID"` // Sync/update messages
-		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
-		SenderID     string `json:"sender_id"`    // Legacy
-		Zone         string `json:"Zone"`
-		LegacyZone   string `json:"zone"`  // Legacy
-		Nonce        string `json:"nonce"` // Nonce for replay protection
-	}
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return nil, fmt.Errorf("failed to parse message: %w", err)
-	}
-
-	// M21: Reject messages that set both standard and legacy fields to different values.
-	// This prevents ambiguity where an attacker could set conflicting field values
-	// to bypass routing or authorization logic.
-	if fields.MessageType != "" && fields.Type != "" && fields.MessageType != fields.Type {
-		return nil, fmt.Errorf("conflicting message type fields: MessageType=%q vs type=%q", fields.MessageType, fields.Type)
-	}
-	if fields.Zone != "" && fields.LegacyZone != "" && fields.Zone != fields.LegacyZone {
-		return nil, fmt.Errorf("conflicting zone fields: Zone=%q vs zone=%q", fields.Zone, fields.LegacyZone)
-	}
-
-	// Determine message type: prefer MessageType, fall back to legacy "type"
-	msgType := fields.MessageType
-	if msgType == "" {
-		msgType = fields.Type
-	}
-	if msgType == "" {
-		return nil, fmt.Errorf("no message type found in payload")
-	}
-
-	// Get sender ID: OriginatorID (sync/update), MyIdentity (hello/beat/ping), sender_id (legacy)
-	senderID := fields.OriginatorID
-	if senderID == "" {
-		senderID = fields.MyIdentity
-	}
-	if senderID == "" {
-		senderID = fields.SenderID
-	}
-
-	// Get zone: prefer Zone, fall back to legacy zone
-	zone := fields.Zone
-	if zone == "" {
-		zone = fields.LegacyZone
-	}
-
-	return &IncomingMessage{
-		Type:           msgType,
-		TypeToken:      msgType,
-		DistributionID: distributionID,
-		SenderID:       senderID,
-		Zone:           zone,
-		Nonce:          fields.Nonce,
-		Payload:        payload,
-		ReceivedAt:     time.Now(),
-		SourceAddr:     sourceAddr,
-	}, nil
-}
-
 // sendResponse sends a DNS response with the given rcode.
 func (h *ChunkNotifyHandler) sendResponse(w dns.ResponseWriter, req *dns.Msg, rcode int) error {
 	if w == nil {
@@ -418,6 +355,10 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		lgTransport().Error("router is nil, cannot route message", "qname", qname)
 		return fmt.Errorf("router not configured")
 	}
+	if h.ParseApp == nil {
+		lgTransport().Error("no payload parser installed, cannot route message", "qname", qname)
+		return fmt.Errorf("ParseApp not configured")
+	}
 
 	sourceAddr := ""
 	if w != nil {
@@ -502,13 +443,9 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		lgTransport().Debug("successfully decrypted payload", "source", sourceAddr, "key_for", senderHint)
 	}
 
-	// Parse payload: the application's parser if installed (C5), else the
-	// built-in one. Either way the result carries the verb transport routes on.
-	parse := h.parsePayload
-	if h.ParseApp != nil {
-		parse = h.ParseApp
-	}
-	incomingMsg, err := parse(distributionID, payload, sourceAddr)
+	// Parse the payload with the application's parser; the result carries
+	// the verb transport routes on.
+	incomingMsg, err := h.ParseApp(distributionID, payload, sourceAddr)
 	if err != nil {
 		lgTransport().Error("failed to parse payload", "err", err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
@@ -521,7 +458,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	// For forwarded messages, SenderID is the original author while TransportSender is the relay agent.
 	incomingMsg.TransportSender = senderHint
 
-	msgType := MessageType(incomingMsg.Type)
+	msgType := MessageType(incomingMsg.Token())
 	lgTransport().Debug("determined message type", "type", msgType, "sender", incomingMsg.SenderID, "transport_sender", senderHint)
 
 	// Create message context
