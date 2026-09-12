@@ -26,6 +26,7 @@ type IncomingMessage struct {
 	Payload         []byte    // Raw payload (JSON)
 	ReceivedAt      time.Time // When the message was received
 	SourceAddr      string    // Source address of the sender
+	Mechanism       string    // "DNS" or "API": the mechanism the message arrived on (set by the pipeline)
 }
 
 // parseConfirmStatus converts a status string to ConfirmStatus.

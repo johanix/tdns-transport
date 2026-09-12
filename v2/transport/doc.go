@@ -23,8 +23,11 @@ ReliableMessageQueue until the receiver's inline confirmation clears it
 The DNS mechanism (DNSTransport) sends a NOTIFY for the CHUNK type with the
 payload in an EDNS0 CHUNK option, or in query mode serves the payload as
 CHUNK records the receiver fetches. The receiver's inline confirmation comes
-back in the NOTIFY response. The HTTPS mechanism (APITransport) posts JSON
-and carries hello, beat, ping, confirm and the sync family only.
+back in the NOTIFY response. The HTTPS mechanism (APITransport) posts the
+same hello, beat and ping bodies to the receiver's sync API and an
+application message's payload verbatim to its /msg endpoint; the
+receiver's reply object is the confirmation. It carries the sync family
+only, because that is what every receiver in the field accepts on /msg.
 
 # Receiving
 
@@ -36,9 +39,17 @@ fetches the payload from the EDNS0 option or by CHUNK query; checks the
 envelope label; verifies and decrypts with the named sender's key and no
 other; has the application parse the payload; asks the application again,
 now with the zone; and only then enters the router. The router runs the
-statistics and logging middleware and the verb's handler; the response
-wrapper sends the DNS response with the handler's inline confirmation; the
-callback wrapper hands the parsed message to the application.
+statistics and logging middleware and the verb's handler; the reply wrapper
+hands the handler's inline confirmation to the mechanism's sink (the DNS
+response, or the HTTP response body); the callback wrapper hands the parsed
+message to the application.
+
+ChunkNotifyHandler.RouteAPIPayload is the same pipeline's entry for the
+HTTPS mechanism: the application's sync API endpoints hand it the request
+body after TLS has authenticated the peer, and it parses, authorizes,
+routes and replies exactly as for a NOTIFY, so one verb table governs both
+mechanisms. IncomingMessage.Mechanism tells the application which one a
+message arrived on.
 
 What the pipeline and the handlers exchange rides on MessageContext, through
 the typed accessors in message_context.go.

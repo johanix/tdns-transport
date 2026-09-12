@@ -255,58 +255,6 @@ func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8)
 	return payload, core.FormatJSON
 }
 
-// SendResponseMiddleware sends the DNS response after all handlers complete.
-// This middleware should be the outermost one (last to wrap, first to execute on return).
-func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
-	return func(ctx *MessageContext, next MessageHandlerFunc) error {
-		// Execute the handler chain
-		err := next(ctx)
-
-		// Determine response code
-		rcode := dns.RcodeSuccess
-		if err != nil {
-			lgTransport().Error("handler error", "err", err)
-			rcode = dns.RcodeServerFailure
-		}
-
-		// An explicit rcode (set by the default handler, etc.) wins
-		if rc, ok := ctx.ResponseRcode(); ok {
-			rcode = rc
-		}
-
-		// The handler's own response payload (the inline confirmation)
-		if payload, ok := ctx.ResponsePayload(); ok {
-			payload, format := encryptResponsePayload(ctx, payload)
-			return sendChunkResponse(w, msg, payload, format, rcode)
-		}
-
-		// Build a generic EDNS0 confirmation for all other message types (hello, beat, etc).
-		// The sender requires an EDNS0 CHUNK confirmation to distinguish "message received
-		// and processed" from a bare DNS ACK (which could come from any DNS server).
-		if rcode == dns.RcodeSuccess {
-			confirmPayload := struct {
-				Type           string `json:"type"`
-				DistributionID string `json:"distribution_id"`
-				Status         string `json:"status"`
-				Message        string `json:"message"`
-				Timestamp      int64  `json:"timestamp"`
-			}{
-				Type:           "confirm",
-				DistributionID: ctx.DistributionID,
-				Status:         "ok",
-				Message:        "received",
-				Timestamp:      time.Now().Unix(),
-			}
-			payloadBytes, marshalErr := json.Marshal(confirmPayload)
-			if marshalErr == nil {
-				payloadBytes, format := encryptResponsePayload(ctx, payloadBytes)
-				return sendChunkResponse(w, msg, payloadBytes, format, rcode)
-			}
-		}
-		return sendStandardResponse(w, msg, rcode)
-	}
-}
-
 // sendChunkResponse sends a DNS response with CHUNK payload in EDNS0.
 func sendChunkResponse(w dns.ResponseWriter, req *dns.Msg, payload []byte, format uint8, rcode int) error {
 	resp := new(dns.Msg)

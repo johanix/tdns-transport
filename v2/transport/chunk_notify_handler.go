@@ -430,42 +430,129 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		lgTransport().Debug("successfully decrypted payload", "source", sourceAddr, "key_for", senderHint)
 	}
 
+	return h.route(ctx, routeInput{
+		distributionID: distributionID,
+		senderHint:     senderHint,
+		payload:        payload,
+		envelope:       envelope,
+		sourceAddr:     sourceAddr,
+		mechanism:      MechanismDNS,
+		request:        msg,
+	}, dnsReply{w: w, msg: msg})
+}
+
+// Mechanism names as IncomingMessage.Mechanism carries them.
+const (
+	MechanismDNS = "DNS"
+	MechanismAPI = "API"
+)
+
+// RouteAPIPayload is the receive pipeline's entry for the HTTPS mechanism:
+// the body of a POST to one of the sync API endpoints, already
+// authenticated by TLS and the application's TLSA check, and not
+// encrypted at the payload level. It is parsed with the application's
+// parser, the sender it names is authorized (at all, then for the zone),
+// the verb is routed like a NOTIFY(CHUNK)'s, and the answer goes to the
+// sink the application supplies, which shapes the HTTP response.
+func (h *ChunkNotifyHandler) RouteAPIPayload(ctx context.Context, payload []byte, sourceAddr string, sink ReplySink) error {
+	if h.Router == nil {
+		lgTransport().Error("router is nil, cannot route API message", "source", sourceAddr)
+		return sink.Fail(dns.RcodeServerFailure)
+	}
+	if h.ParseApp == nil {
+		lgTransport().Error("no payload parser installed, cannot route API message", "source", sourceAddr)
+		return sink.Fail(dns.RcodeServerFailure)
+	}
+	return h.route(ctx, routeInput{
+		distributionID: GenerateDistributionID(),
+		payload:        payload,
+		envelope:       EnvelopeNone,
+		sourceAddr:     sourceAddr,
+		mechanism:      MechanismAPI,
+	}, sink)
+}
+
+// routeInput is what the pipeline tail needs from either entry.
+type routeInput struct {
+	distributionID string
+	// senderHint is the transport-level sender when the mechanism names
+	// one before the payload is read (the NOTIFY query name); empty means
+	// the parsed message names the sender, and the sender authorization
+	// that the DNS entry ran before decryption runs after parsing instead.
+	senderHint string
+	payload    []byte // plaintext
+	envelope   uint8  // the label as received (kept on the context for the record)
+	sourceAddr string
+	mechanism  string
+	request    *dns.Msg // the DNS request, nil for the HTTPS mechanism
+}
+
+// route is the pipeline tail shared by both mechanisms: parse, authorize
+// the sender for the zone, build the context, run the router under the
+// reply wrapper.
+func (h *ChunkNotifyHandler) route(ctx context.Context, in routeInput, sink ReplySink) error {
 	// Parse the payload with the application's parser; the result carries
 	// the verb transport routes on.
-	incomingMsg, err := h.ParseApp(distributionID, payload, sourceAddr)
+	incomingMsg, err := h.ParseApp(in.distributionID, in.payload, in.sourceAddr)
 	if err != nil {
 		lgTransport().Error("failed to parse payload", "err", err)
-		return h.sendResponse(w, msg, dns.RcodeFormatError)
+		return sink.Fail(dns.RcodeFormatError)
 	}
 	if incomingMsg == nil {
-		lgTransport().Error("payload parser returned no message", "distrib", distributionID, "source", sourceAddr)
-		return h.sendResponse(w, msg, dns.RcodeFormatError)
+		lgTransport().Error("payload parser returned no message", "distrib", in.distributionID, "source", in.sourceAddr)
+		return sink.Fail(dns.RcodeFormatError)
 	}
-	// Set the transport-level sender (from QNAME) — distinct from SenderID (payload OriginatorID).
+
+	senderHint := in.senderHint
+	if senderHint == "" {
+		// The HTTPS mechanism: the parsed message names the sender, and
+		// the "known at all" authorization the DNS entry ran before its
+		// crypto runs here.
+		senderHint = incomingMsg.SenderID
+		if senderHint == "" {
+			lgTransport().Warn("message names no sender", "source", in.sourceAddr, "mechanism", in.mechanism)
+			return sink.Fail(dns.RcodeFormatError)
+		}
+		if h.IsPeerAuthorized != nil {
+			if authorized, reason := h.IsPeerAuthorized(senderHint, ""); !authorized {
+				count := atomic.AddUint64(&h.unsolicitedCount, 1)
+				if count%unsolicitedWarnThreshold == 0 {
+					lgTransport().Warn("sustained unsolicited messages from unauthorized senders",
+						"total_count", count, "latest_peer", senderHint, "source", in.sourceAddr, "reason", reason)
+				} else {
+					lgTransport().Debug("rejected message from unauthorized sender",
+						"peer", senderHint, "source", in.sourceAddr, "reason", reason)
+				}
+				return sink.Fail(dns.RcodeRefused)
+			}
+		}
+	}
+	// Set the transport-level sender — distinct from SenderID (payload OriginatorID).
 	// For forwarded messages, SenderID is the original author while TransportSender is the relay agent.
 	incomingMsg.TransportSender = senderHint
+	incomingMsg.Mechanism = in.mechanism
 
 	msgType := MessageType(incomingMsg.Token())
-	lgTransport().Debug("determined message type", "type", msgType, "sender", incomingMsg.SenderID, "transport_sender", senderHint)
+	lgTransport().Debug("determined message type", "type", msgType, "sender", incomingMsg.SenderID, "transport_sender", senderHint, "mechanism", in.mechanism)
 
 	// Create message context
-	msgCtx := NewMessageContext(msg, sourceAddr)
-	msgCtx.DistributionID = distributionID
+	msgCtx := NewMessageContext(in.request, in.sourceAddr)
+	msgCtx.DistributionID = in.distributionID
 	msgCtx.PeerID = senderHint
-	msgCtx.ChunkPayload = payload
-	msgCtx.RemoteAddr = sourceAddr
-	// The payload is plaintext now: verified and decrypted above with the
-	// claimed sender's key. The label as received is kept for the record.
+	msgCtx.ChunkPayload = in.payload
+	msgCtx.RemoteAddr = in.sourceAddr
+	// The payload is plaintext now. The label as received is kept for the record.
 	msgCtx.ChunkEnvelope = EnvelopeNone
-	msgCtx.SetWireEnvelope(envelope)
+	msgCtx.SetWireEnvelope(in.envelope)
 	// Local identity, so handlers (e.g. ping) can include it in responses
 	msgCtx.SetLocalID(h.LocalID)
 	// Transport, for confirmation handling
 	if h.Transport != nil {
 		msgCtx.SetDNSTransport(h.Transport)
 	}
-	// SecureWrapper + peer ID, so SendResponseMiddleware can encrypt responses
-	if h.SecureWrapper != nil {
+	// SecureWrapper + peer ID, so the DNS reply can encrypt the response;
+	// the HTTPS mechanism carries no payload crypto.
+	if h.SecureWrapper != nil && in.mechanism == MechanismDNS {
 		msgCtx.SetSecureWrapper(h.SecureWrapper)
 	}
 	msgCtx.SetResponsePeerID(senderHint)
@@ -481,44 +568,39 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	if incomingMsg.Zone != "" {
 		msgCtx.SetZone(incomingMsg.Zone)
 		lgTransport().Debug("extracted zone for authorization", "zone", incomingMsg.Zone)
-	} else if msgType == MessageType("beat") {
+	} else if msgType == MessageType(VerbBeat) {
 		// For beat messages, extract zones from the Zones array
-		// Parse the raw payload to get the Zones field from AgentBeatPost
 		var beatPayload struct {
 			Zones []string `json:"Zones"`
 		}
-		// M11: payload is DNS-sourced (bounded by wire size), safe to unmarshal without size limit
-		if err := json.Unmarshal(payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
+		// M11: payload is wire-sourced (bounded by message size), safe to unmarshal without size limit
+		if err := json.Unmarshal(in.payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
 			// Use first shared zone for authorization
 			msgCtx.SetZone(beatPayload.Zones[0])
 			lgTransport().Debug("extracted zone from beat for authorization", "zone", beatPayload.Zones[0])
 		}
 	}
 
-	// M20: Zone-peer authorization check. Now that we have the zone from the (decrypted) payload,
-	// verify that this peer is authorized for this specific zone. The pre-crypto check (H8 above)
+	// M20: Zone-peer authorization check. Now that we have the zone from the payload,
+	// verify that this peer is authorized for this specific zone. The pre-crypto check
 	// only verified the peer is known at all (zone=""); this check validates the zone-peer binding.
 	if h.IsPeerAuthorized != nil {
 		if zone := msgCtx.Zone(); zone != "" {
 			authorized, reason := h.IsPeerAuthorized(senderHint, zone)
 			if !authorized {
 				lgTransport().Warn("peer not authorized for zone", "peer", senderHint, "zone", zone, "reason", reason)
-				return h.sendResponse(w, msg, dns.RcodeRefused)
+				return sink.Fail(dns.RcodeRefused)
 			}
 		}
 	}
 
-	// Route through router (middleware + handlers)
-	// The SendResponseMiddleware will send the DNS response
-	responseMiddleware := SendResponseMiddleware(w, msg)
-	err = responseMiddleware(msgCtx, func(ctx *MessageContext) error {
+	// Route through router (middleware + handlers); the reply wrapper answers.
+	err = replyMiddleware(sink)(msgCtx, func(ctx *MessageContext) error {
 		return h.Router.Route(ctx, msgType)
 	})
-
 	if err != nil {
 		lgTransport().Error("routing failed", "err", err)
-		return h.sendResponse(w, msg, dns.RcodeServerFailure)
+		return sink.Fail(dns.RcodeServerFailure)
 	}
-
 	return nil
 }
