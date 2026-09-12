@@ -1,24 +1,31 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * Crypto backend abstraction layer for TDNS
- * Supports multiple cryptographic backends (HPKE, JOSE) for key distribution
+ * Crypto backend abstraction layer for the tdns transport.
+ *
+ * A backend owns one envelope: how a payload is encrypted for a peer and
+ * signed by the sender, and how the result is serialized. The transport's
+ * PayloadCrypto is written against this interface only; the JOSE backend
+ * is the one in production, and a COSE backend (with HPKE as its recipient
+ * algorithm) is the planned second.
  */
 
 package crypto
 
 // Backend defines the interface that all cryptographic backends must implement.
-// This allows TDNS to support multiple encryption mechanisms (HPKE, JOSE)
-// while keeping the distribution logic crypto-agnostic.
 type Backend interface {
-	// Name returns the backend identifier (e.g., "hpke", "jose")
+	// Name returns the backend identifier (e.g., "jose")
 	Name() string
+
+	// Envelope returns the label the backend's EncryptAndSign output
+	// carries on the wire.
+	Envelope() Envelope
 
 	// GenerateKeypair generates a new key pair suitable for this backend
 	GenerateKeypair() (PrivateKey, PublicKey, error)
 
 	// ParsePublicKey deserializes a public key from bytes
-	// The format is backend-specific (e.g., raw bytes for HPKE, JWK JSON for JOSE)
+	// The format is backend-specific (JWK JSON for JOSE)
 	ParsePublicKey(data []byte) (PublicKey, error)
 
 	// ParsePrivateKey deserializes a private key from bytes
@@ -53,8 +60,8 @@ type Backend interface {
 	// - Multiple recipient entries, each with encrypted CEK
 	// - Protected headers with metadata (distribution_id, timestamp, etc.)
 	//
-	// For backends that don't support native multi-recipient (e.g., HPKE),
-	// this may use multiple single-recipient encryptions in JWE recipients array.
+	// A backend without native multi-recipient support may encrypt for
+	// each recipient separately inside its envelope.
 	//
 	// The metadata map should contain JWE protected header fields:
 	//   - "distribution_id": string - Distribution identifier
@@ -74,13 +81,9 @@ type Backend interface {
 	// - JWE Compact Serialization (single-recipient, for backward compatibility)
 	DecryptMultiRecipient(privKey PrivateKey, ciphertext []byte) ([]byte, error)
 
-	// Sign signs data using the private key, returning a JWS structure.
-	// The signature format depends on the backend:
-	// - JOSE backend: ES256 (P-256 ECDSA)
-	// - HPKE backend: Ed25519 or separate signing keypair
-	//
-	// Returns JWS Compact Serialization: <header>.<payload>.<signature>
-	// where payload is base64url(data).
+	// Sign signs data using the private key and returns the backend's
+	// signed structure (for JOSE: ES256, JWS compact serialization with
+	// base64url(data) as the payload).
 	Sign(privKey PrivateKey, data []byte) ([]byte, error)
 
 	// Verify verifies a JWS signature using the public key.
@@ -92,6 +95,20 @@ type Backend interface {
 	// This allows converting discovered keys (from JWK records, etc.) to backend-specific types.
 	// The stdlib key type must be compatible with the backend (e.g., ECDSA for JOSE).
 	PublicKeyFromStdlib(stdlibKey interface{}) (PublicKey, error)
+
+	// PublicFromPrivate returns the public half of a private key.
+	PublicFromPrivate(priv PrivateKey) (PublicKey, error)
+
+	// EncryptAndSign produces the backend's envelope for the recipients:
+	// the plaintext encrypted for them and signed by signingKey, with the
+	// metadata in the envelope's protected header. This is what the
+	// transport puts on the wire (behind its outer standard-base64 layer).
+	EncryptAndSign(recipients []PublicKey, plaintext []byte, signingKey PrivateKey, metadata map[string]interface{}) ([]byte, error)
+
+	// DecryptAndVerify is the inverse of EncryptAndSign: it verifies the
+	// envelope's signature with verifyKey and decrypts with privKey, in
+	// that order, and returns the plaintext.
+	DecryptAndVerify(privKey PrivateKey, verifyKey PublicKey, ciphertext []byte) ([]byte, error)
 }
 
 // PrivateKey represents a private key (backend-specific implementation)

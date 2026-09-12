@@ -53,26 +53,6 @@ func ExampleEncrypt() {
 	fmt.Printf("Match: %v\n", string(decrypted) == string(plaintext))
 }
 
-func ExampleGenerateDistributionID() {
-	// Generate a distribution ID
-	distID, err := GenerateDistributionID()
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Distribution ID: %s\n", distID)
-
-	// Validate it
-	err = ValidateDistributionID(distID)
-	if err != nil {
-		fmt.Printf("Validation error: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Valid distribution ID\n")
-}
-
 func ExampleEncrypt_encryptDNSSECKey() {
 	// Simulate encrypting a DNSSEC private key for distribution
 	recipientPub, recipientPriv, _ := GenerateKeyPair()

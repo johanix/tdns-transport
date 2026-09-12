@@ -246,7 +246,7 @@ func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8)
 	if sw := ctx.SecureWrapper(); sw != nil && sw.IsEnabled() {
 		if peerID := ctx.ResponsePeerID(); peerID != "" {
 			if encrypted, err := sw.WrapOutgoing(peerID, payload); err == nil {
-				return encrypted, core.FormatJWT
+				return encrypted, sw.Envelope()
 			} else {
 				lgTransport().Error("response encryption failed", "peer", peerID, "err", err)
 			}

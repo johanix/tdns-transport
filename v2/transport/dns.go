@@ -330,7 +330,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	if t.distributionAdd != nil {
@@ -505,7 +505,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	// Create NOTIFY message
@@ -548,7 +548,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	if t.distributionAdd != nil {

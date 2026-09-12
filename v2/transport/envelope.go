@@ -9,6 +9,7 @@ package transport
 import (
 	"fmt"
 
+	"github.com/johanix/tdns-transport/v2/crypto"
 	core "github.com/johanix/tdns/v2/core"
 )
 
@@ -30,12 +31,17 @@ const (
 	// EnvelopeNone: plain JSON, nothing to unwrap.
 	EnvelopeNone uint8 = core.FormatJSON
 	// EnvelopeJOSE: JWS over JWE, the sender's key signs and the receiver's
-	// key decrypts.
-	EnvelopeJOSE uint8 = core.FormatJWT
+	// key decrypts. The label a backend reports (crypto.Envelope) and the
+	// CHUNK Format code it rides in are the same number, asserted below.
+	EnvelopeJOSE uint8 = uint8(crypto.EnvelopeJOSE)
 	// EnvelopeCOSE is reserved for a CBOR envelope; a receiver answers
 	// FORMERR to it until it is implemented.
-	EnvelopeCOSE uint8 = 3
+	EnvelopeCOSE uint8 = uint8(crypto.EnvelopeCOSE)
 )
+
+// The backend layer's JOSE label must be tdns core's JWT Format code: the
+// label rides in the Format byte. A mismatch is a build error.
+var _ = [1]struct{}{}[EnvelopeJOSE-core.FormatJWT]
 
 // EnvelopeString names an envelope label for logs.
 func EnvelopeString(e uint8) string {

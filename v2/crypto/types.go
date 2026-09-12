@@ -52,3 +52,17 @@ func NewBackendError(backend, op string, err error) error {
 		Err:     err,
 	}
 }
+
+// Envelope is the label a backend's EncryptAndSign output carries on the
+// wire: it tells a receiver how the bytes are wrapped and which backend
+// opens them. The values are the CHUNK Format codes the transport already
+// carried (JSON = 1 is a plain payload, not a backend's envelope); the
+// transport asserts that they agree with tdns core's constants.
+type Envelope uint8
+
+const (
+	// EnvelopeJOSE: JWS over JWE (RFC 7515 over RFC 7516).
+	EnvelopeJOSE Envelope = 2
+	// EnvelopeCOSE: a CBOR envelope (RFC 9052); reserved, no backend yet.
+	EnvelopeCOSE Envelope = 3
+)

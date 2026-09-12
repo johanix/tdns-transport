@@ -93,7 +93,7 @@ func (imr *Imr) DiscoverAgentAPI(ctx context.Context, identity string, result *D
 // DiscoverAgentDNS performs DNS-based discovery of a peer's DNS transport.
 //  1. URI record at _dns._tcp.<identity> → get DNS endpoint URI and port
 //  2. SVCB record at dns.<identity> → get ipv4hint/ipv6hint addresses
-//  3. JWK record at dns.<identity> → get JOSE/HPKE public key (preferred)
+//  3. JWK record at dns.<identity> → get the peer's public key (preferred)
 //  4. KEY record at dns.<identity> → get SIG(0) public key (legacy fallback if no JWK)
 func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *DiscoveryResult) {
 	if imr == nil || imr.Imr == nil {
@@ -117,7 +117,7 @@ func (imr *Imr) DiscoverAgentDNS(ctx context.Context, identity string, result *D
 			result.Partial = true
 		}
 
-		// Look up JWK at dns.<identity> for JOSE/HPKE public key
+		// Look up JWK at dns.<identity> for the peer's public key
 		jwkData, publicKey, algorithm, err := imr.LookupAgentJWK(ctx, identity)
 		if err == nil {
 			result.JWKData = jwkData
