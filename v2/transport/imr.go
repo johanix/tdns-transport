@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
@@ -153,6 +154,10 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 			parsed, err := url.Parse(uriRR.Target)
 			if err != nil {
 				lgTransport().Warn("invalid API URI", "uri", uriRR.Target, "err", err)
+				continue
+			}
+			if !strings.EqualFold(parsed.Scheme, "https") {
+				lgTransport().Warn("API URI is not https, skipping", "uri", uriRR.Target)
 				continue
 			}
 

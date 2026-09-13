@@ -12,6 +12,8 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -30,7 +32,7 @@ type apiCapture struct {
 // API's dialect.
 func apiReceiver(t *testing.T, captured *[]apiCapture, reply func(path string, body []byte) interface{}) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read body: %v", err)
@@ -39,6 +41,16 @@ func apiReceiver(t *testing.T, captured *[]apiCapture, reply func(path string, b
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(reply(r.URL.Path, body))
 	}))
+}
+
+// apiClient is an APITransport that trusts the given test servers' certificates.
+func apiClient(cfg *APITransportConfig, servers ...*httptest.Server) *APITransport {
+	pool := x509.NewCertPool()
+	for _, srv := range servers {
+		pool.AddCert(srv.Certificate())
+	}
+	cfg.TLSConfig = &tls.Config{RootCAs: pool}
+	return NewAPITransport(cfg)
 }
 
 func apiPeer(url string) *Peer {
@@ -63,7 +75,7 @@ func TestAPIOwnVerbsPostTheWireStructs(t *testing.T) {
 	})
 	defer srv.Close()
 
-	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 5 * time.Second})
+	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 5 * time.Second}, srv)
 	peer := apiPeer(srv.URL)
 	ctx := context.Background()
 
@@ -109,7 +121,7 @@ func TestAPIRejectionsAndNonce(t *testing.T) {
 		return map[string]interface{}{"Error": true}
 	})
 	defer srv.Close()
-	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example."})
+	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
 	peer := apiPeer(srv.URL)
 
 	hello, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."})
@@ -134,7 +146,7 @@ func TestAPISendAppPostsThePayloadVerbatim(t *testing.T) {
 		return map[string]interface{}{"Status": "ok", "AgentId": "b.example.", "Msg": "received", "Error": false}
 	})
 	defer srv.Close()
-	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example."})
+	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
 	peer := apiPeer(srv.URL)
 
 	payload := json.RawMessage(`{"MessageType":"rfi","OriginatorID":"a.example.","YourIdentity":"b.example.","Zone":"z.example.","RfiType":"CONFIG"}`)
@@ -173,4 +185,49 @@ func errorsAs(err error, target **TransportError) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// Only https endpoints are posted to, and a redirect is not followed.
+func TestAPIRefusesPlainHTTPAndRedirects(t *testing.T) {
+	posted := 0
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { posted++ }))
+	defer plain.Close()
+	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example."})
+	if _, err := tr.Hello(context.Background(), apiPeer(plain.URL), &HelloRequest{SenderID: "a.example."}); err == nil {
+		t.Fatal("an http endpoint must be refused")
+	}
+	if posted != 0 {
+		t.Fatal("nothing may be posted to an http endpoint")
+	}
+
+	followed := 0
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { followed++ }))
+	defer target.Close()
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	rt := apiClient(&APITransportConfig{LocalID: "a.example."}, redirector, target)
+	if _, err := rt.Hello(context.Background(), apiPeer(redirector.URL), &HelloRequest{SenderID: "a.example."}); err == nil {
+		t.Fatal("a redirect must be refused")
+	}
+	if followed != 0 {
+		t.Fatal("the redirect was followed")
+	}
+}
+
+// A reply object without Status "ok" is not an acceptance.
+func TestAPIEmptyReplyIsNotAccepted(t *testing.T) {
+	var captured []apiCapture
+	srv := apiReceiver(t, &captured, func(path string, body []byte) interface{} { return map[string]interface{}{} })
+	defer srv.Close()
+	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
+	hello, err := tr.Hello(context.Background(), apiPeer(srv.URL), &HelloRequest{SenderID: "a.example."})
+	if err != nil || hello.Accepted {
+		t.Fatalf("empty reply accepted: %+v %v", hello, err)
+	}
+	beat, err := tr.Beat(context.Background(), apiPeer(srv.URL), &BeatRequest{SenderID: "a.example."})
+	if err != nil || beat.Ack {
+		t.Fatalf("empty reply acked a beat: %+v %v", beat, err)
+	}
 }

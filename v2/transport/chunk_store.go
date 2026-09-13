@@ -31,11 +31,15 @@ type chunkArrayEntry struct {
 
 const chunkStoreMaxEntries = 10000
 
-// MemChunkStore is an in-memory ChunkStore with a TTL and a size cap.
+// MemChunkStore is an in-memory ChunkStore with a TTL and a size cap. An
+// expired entry is dropped when it is read, and every entry is swept on a
+// write at most once per TTL, so a distribution nobody fetches does not
+// outlive about twice the TTL while the store is in use.
 type MemChunkStore struct {
 	mu          sync.Mutex
 	chunkArrays map[string]*chunkArrayEntry
 	ttl         time.Duration
+	nextSweep   time.Time
 }
 
 // newMemChunkStore creates a store whose entries expire after ttl
@@ -56,6 +60,11 @@ func (s *MemChunkStore) SetChunks(qname string, chunks []*core.CHUNK) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
+	if now.After(s.nextSweep) {
+		s.sweepExpiredLocked(now)
+		s.nextSweep = now.Add(s.ttl)
+	}
 	if _, exists := s.chunkArrays[qname]; !exists && len(s.chunkArrays) >= chunkStoreMaxEntries {
 		s.evictOldestLocked()
 	}
@@ -72,7 +81,16 @@ func (s *MemChunkStore) SetChunks(qname string, chunks []*core.CHUNK) {
 
 	s.chunkArrays[qname] = &chunkArrayEntry{
 		chunks:  copied,
-		expires: time.Now().Add(s.ttl),
+		expires: now.Add(s.ttl),
+	}
+}
+
+// sweepExpiredLocked removes every expired entry. Must be called with mu held.
+func (s *MemChunkStore) sweepExpiredLocked(now time.Time) {
+	for k, e := range s.chunkArrays {
+		if now.After(e.expires) {
+			delete(s.chunkArrays, k)
+		}
 	}
 }
 

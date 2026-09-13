@@ -29,6 +29,10 @@ import (
 // Use errors.Is(err, ErrNoVerificationKey) instead of string matching on error messages.
 var ErrNoVerificationKey = errors.New("no verification key")
 
+// ErrPlaintextRefused is returned for an unwrapped payload while payload
+// crypto is enabled: nothing proves who sent it, whatever identity it claims.
+var ErrPlaintextRefused = errors.New("plaintext payload refused: payload crypto is enabled")
+
 // PayloadCrypto handles encryption and signing of DNS transport payloads.
 // It wraps a crypto.Backend to provide a simple interface for the DNS transport.
 type PayloadCrypto struct {
@@ -288,16 +292,20 @@ func (w *SecurePayloadWrapper) unwrapIncoming(peerID string, payload []byte) ([]
 }
 
 // unwrapIncomingFromPeerEnvelope is unwrapIncomingFromPeer driven by the
-// payload's envelope label instead of a byte-sniff. EnvelopeNone returns the
-// payload as it is (what the sniff concluded for plain JSON until now);
+// payload's envelope label instead of a byte-sniff. EnvelopeNone passes the
+// payload through when payload crypto is off and is refused when it is on;
 // EnvelopeJOSE requires payload crypto and the named peer's verification
-// key, and decrypts with that key only; EnvelopeUnknown keeps the legacy
-// sniffing behaviour for a payload that arrived without a label.
+// key, and decrypts with that key only; EnvelopeUnknown sniffs the bytes of
+// a payload that arrived without a label, and refuses plaintext the same
+// way.
 func (w *SecurePayloadWrapper) unwrapIncomingFromPeerEnvelope(payload []byte, requiredPeerID string, envelope uint8) ([]byte, error) {
 	switch envelope {
 	case EnvelopeUnknown:
 		return w.unwrapIncomingFromPeer(payload, requiredPeerID)
 	case EnvelopeNone:
+		if w.IsEnabled() {
+			return nil, fmt.Errorf("%w: from %s", ErrPlaintextRefused, requiredPeerID)
+		}
 		return payload, nil
 	case EnvelopeJOSE:
 		if w.crypto == nil || !w.crypto.Enabled {
@@ -359,7 +367,7 @@ func (w *SecurePayloadWrapper) unwrapIncomingFromPeer(payload []byte, requiredPe
 		return payload, nil
 	}
 	if !isPayloadEncrypted(payload) {
-		return payload, nil
+		return nil, fmt.Errorf("%w: from %s", ErrPlaintextRefused, requiredPeerID)
 	}
 
 	// Verify we have the peer's key

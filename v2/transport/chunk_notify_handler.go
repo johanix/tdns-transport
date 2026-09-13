@@ -421,6 +421,11 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 				return nil
 			}
 
+			if errors.Is(err, ErrPlaintextRefused) {
+				lgTransport().Warn("SECURITY: plaintext payload refused, payload crypto is enabled",
+					"source", sourceAddr, "claimed_peer", senderHint)
+				return h.sendResponse(w, msg, dns.RcodeRefused)
+			}
 			// Decryption failed with the claimed sender's key — possible forgery
 			lgTransport().Warn("SECURITY: decryption failed for NOTIFY, possible forgery",
 				"source", sourceAddr, "claimed_peer", senderHint, "err", err)
@@ -595,12 +600,14 @@ func (h *ChunkNotifyHandler) route(ctx context.Context, in routeInput, sink Repl
 	}
 
 	// Route through router (middleware + handlers); the reply wrapper answers.
-	err = replyMiddleware(sink)(msgCtx, func(ctx *MessageContext) error {
+	// A handler error is already answered (SERVFAIL) by the reply wrapper, so
+	// an error here is the sink's own, after it answered: report it, do not
+	// answer twice.
+	if err = replyMiddleware(sink)(msgCtx, func(ctx *MessageContext) error {
 		return h.Router.Route(ctx, msgType)
-	})
-	if err != nil {
-		lgTransport().Error("routing failed", "err", err)
-		return sink.Fail(dns.RcodeServerFailure)
+	}); err != nil {
+		lgTransport().Error("sending the reply failed", "mechanism", in.mechanism, "err", err)
+		return err
 	}
 	return nil
 }

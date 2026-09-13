@@ -41,6 +41,17 @@ func TestMemChunkStore(t *testing.T) {
 	}
 }
 
+// An entry nobody reads is swept by a later write, not kept until the cap.
+func TestMemChunkStore_SweepsUnread(t *testing.T) {
+	s := newMemChunkStore(20 * time.Millisecond)
+	s.SetChunks("b.d1.a.", []*core.CHUNK{{Sequence: 0, Total: 1, Data: []byte("manifest")}})
+	time.Sleep(50 * time.Millisecond)
+	s.SetChunks("b.d2.a.", []*core.CHUNK{{Sequence: 0, Total: 1, Data: []byte("manifest")}})
+	if n := s.Len(); n != 1 {
+		t.Fatalf("Len = %d after the sweep, want 1 (the expired entry nobody read must go)", n)
+	}
+}
+
 // The manifest carries the payload's envelope label in query mode.
 func TestEnvelopeFromManifest(t *testing.T) {
 	chunks, err := distrib.PrepareDistributionChunks([]byte("payload"), "ping", "d1", "b.", nil, 0,

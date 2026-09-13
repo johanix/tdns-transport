@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -53,7 +55,8 @@ func NewAPITransport(cfg *APITransportConfig) *APITransport {
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: timeout,
 		HTTPClient: &http.Client{
-			Timeout: timeout,
+			Timeout:       timeout,
+			CheckRedirect: refuseRedirect,
 			Transport: &http.Transport{
 				TLSClientConfig: tlsConfig,
 			},
@@ -79,7 +82,31 @@ func apiURL(peer *Peer, path string) (string, error) {
 		// callers a clear error instead.
 		return "", fmt.Errorf("peer %s has no API endpoint configured", peer.ID)
 	}
+	if err := requireHTTPS(peer.APIEndpoint); err != nil {
+		return "", fmt.Errorf("peer %s: %w", peer.ID, err)
+	}
 	return peer.APIEndpoint + path, nil
+}
+
+// requireHTTPS refuses an API endpoint that is not an https URL: the HTTPS
+// mechanism carries application payloads verbatim, and TLS is all that
+// protects them.
+func requireHTTPS(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid API endpoint %q: %w", endpoint, err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+		return fmt.Errorf("API endpoint %q is not an https URL", endpoint)
+	}
+	return nil
+}
+
+// refuseRedirect keeps the client from following a redirect: the sync API
+// never redirects, and a redirect would take the payload somewhere the
+// peer's discovered endpoint did not name.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("redirect to %s refused", req.URL.Redacted())
 }
 
 // The HTTPS mechanism speaks the same bodies the multi-provider sync API
@@ -115,9 +142,11 @@ func (r *apiReply) responderOf(peer *Peer) string {
 	return peer.ID
 }
 
-// accepted reports whether the receiver processed the message.
+// accepted reports whether the receiver processed the message. Every
+// receiver of the sync API sets Status "ok" on success; a reply without it
+// (an empty object included) is not an acceptance.
 func (r *apiReply) accepted() bool {
-	return !r.Error && (r.Status == "ok" || r.Status == "")
+	return !r.Error && r.Status == "ok"
 }
 
 // Hello sends a hello handshake request to a peer via HTTPS API.
@@ -153,7 +182,6 @@ func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 
 	return &HelloResponse{
 		ResponderID: reply.responderOf(peer),
-		SharedZones: req.SharedZones,
 		Accepted:    true,
 		Timestamp:   time.Now(),
 		Nonce:       req.Nonce,

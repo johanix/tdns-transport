@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,18 @@ func TestUnwrapIncomingFromPeerEnvelope_noCrypto(t *testing.T) {
 	}
 	if out, err := w.unwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeUnknown); err != nil || string(out) != string(plain) {
 		t.Fatalf("unlabelled plain: out=%q err=%v", out, err)
+	}
+}
+
+// With payload crypto on, plaintext is refused whether it is labelled none
+// or arrives unlabelled: an unsigned payload proves nothing about its sender.
+func TestUnwrapIncomingFromPeerEnvelope_cryptoOnRefusesPlaintext(t *testing.T) {
+	_, receiver := seamPair(t)
+	plain := []byte(`{"MessageType":"sync","OriginatorID":"a.example."}`)
+	for _, e := range []uint8{EnvelopeNone, EnvelopeUnknown} {
+		if out, err := receiver.unwrapIncomingFromPeerEnvelope(plain, "a.example.", e); !errors.Is(err, ErrPlaintextRefused) {
+			t.Errorf("%s plaintext with crypto on: out=%q err=%v, want ErrPlaintextRefused", envelopeString(e), out, err)
+		}
 	}
 }
 
