@@ -15,15 +15,15 @@ type StatsMiddlewareConfig struct {
 	Verbose bool
 }
 
-// NewStatsMiddleware creates middleware for tracking message statistics.
+// newStatsMiddleware creates middleware for tracking message statistics.
 // This middleware records:
 //   - Per-message-type counters (hello, beat, sync, ping)
 //   - Separate sent/received counters
 //   - Last Used timestamp (updated on every message)
 //   - Total distribution counts
 //
-// The middleware runs AFTER authorization, so we know the peer is valid.
-func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
+// The peer was authorized by RouteViaRouter before the router was entered.
+func newStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		// Skip if no peer registry
 		if cfg.PeerRegistry == nil {
@@ -41,13 +41,13 @@ func NewStatsMiddleware(cfg *StatsMiddlewareConfig) MiddlewareFunc {
 		// Determine message type from context
 		// The router has already parsed and validated the message type
 		msgType := ""
-		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
-			msgType = incomingMsg.Type
+		if incomingMsg, ok := ctx.Incoming(); ok {
+			msgType = incomingMsg.Token()
 		}
 
 		// Record incoming message statistics
 		if msgType != "" {
-			peer.Stats.RecordMessageReceived(msgType)
+			peer.Stats.recordMessageReceived(msgType)
 
 			lastUsed, totalSent, totalReceived := peer.Stats.GetStats()
 			lgTransport().Debug("peer stats updated", "peer", ctx.PeerID, "type", msgType,

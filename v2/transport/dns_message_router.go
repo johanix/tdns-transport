@@ -32,27 +32,23 @@ type MessageContext struct {
 	RemoteAddr     string
 	DistributionID string // Unique identifier for this CHUNK distribution
 
-	// Extracted CHUNK payload (if any)
+	// Extracted CHUNK payload (if any). By the time a handler runs it is
+	// plaintext: RouteViaRouter has verified and decrypted it.
 	ChunkPayload []byte
-	ChunkSigned  bool
-	ChunkCrypted bool
 	// ChunkEnvelope is the envelope label of the payload currently in
 	// ChunkPayload (EnvelopeNone once the receive path has decrypted it);
 	// EnvelopeUnknown when no label was recorded, in which case readers
-	// fall back to sniffing the bytes. The label as received is kept in
-	// Data["wire_envelope"].
+	// fall back to sniffing the bytes. The label as received is kept
+	// separately (wireEnvelope).
 	ChunkEnvelope uint8
 
-	// Peer information (populated by authorization middleware)
-	PeerID          string
-	Peer            *Peer
-	Authorized      bool
-	AuthReason      string // Why was this authorized (or not)
-	AuthorizedVia   string // "explicit" or "implicit" (HSYNC)
-	SignatureValid  bool
-	SignatureReason string
+	// Peer information. PeerID is the sender named in the query name,
+	// authorized by RouteViaRouter before the router is entered.
+	PeerID string
+	Peer   *Peer
 
-	// Middleware can add custom data
+	// What the pipeline and the handlers exchange; read and written through
+	// the accessors in message_context.go.
 	Data map[string]interface{}
 
 	// Metrics
@@ -229,7 +225,7 @@ func (r *DNSMessageRouter) Route(ctx *MessageContext, msgType MessageType) error
 			return fmt.Errorf("no handlers registered for message type %s", msgType)
 		}
 		// Store message type so the default handler can report it
-		ctx.Data["unhandled_message_type"] = string(msgType)
+		ctx.markUnhandled(string(msgType))
 		// Route through middleware chain with the default handler
 		handler := r.defaultHandler
 		for i := len(r.middleware) - 1; i >= 0; i-- {

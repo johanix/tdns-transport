@@ -41,9 +41,10 @@ type TransportManagerConfig struct {
 	ChunkQueryEndpoint         string
 	ChunkQueryEndpointInNotify bool
 
-	// CHUNK query-mode payload store callbacks (nil disables query mode)
-	ChunkPayloadGet func(qname string) ([]byte, uint8, bool)
-	ChunkPayloadSet func(qname string, payload []byte, format uint8)
+	// ChunkStore for query mode; nil means the transport's own in-memory
+	// store. The application calls DNSTransport.ServeChunkQueries to
+	// answer for it.
+	ChunkStore ChunkStore
 
 	// Crypto
 	PayloadCrypto *PayloadCrypto
@@ -137,7 +138,7 @@ type TransportManager struct {
 // SetSupportedMechanisms sets the active mechanism set for managers
 // constructed via struct literal rather than NewTransportManager (tdns-mp
 // builds its bridge that way). The in-package discovery process consults
-// this via IsTransportSupported (Fix E: only locally-supported transports
+// this via isTransportSupported (Fix E: only locally-supported transports
 // are probed).
 func (tm *TransportManager) SetSupportedMechanisms(mechanisms []string) {
 	tm.supportedMechanisms = mechanisms
@@ -173,8 +174,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			Timeout:                    dnsTimeout,
 			PayloadCrypto:              cfg.PayloadCrypto,
 			ChunkMode:                  cfg.ChunkMode,
-			ChunkPayloadGet:            cfg.ChunkPayloadGet,
-			ChunkPayloadSet:            cfg.ChunkPayloadSet,
+			ChunkStore:                 cfg.ChunkStore,
 			ChunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 			ChunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 			ChunkMaxSize:               cfg.ChunkMaxSize,
@@ -272,7 +272,7 @@ func (tm *TransportManager) RegisterChunkNotifyHandler(
 // provides this to handle transport selection and actual sending.
 func (tm *TransportManager) StartReliableQueue(ctx context.Context,
 	sendFunc func(ctx context.Context, msg *OutgoingMessage) error) {
-	tm.ReliableQueue.SetSendFunc(sendFunc)
+	tm.ReliableQueue.setSendFunc(sendFunc)
 	go tm.ReliableQueue.Start(ctx)
 	slog.Info("reliable queue started")
 }
@@ -313,7 +313,7 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	// Only the sync family has an API endpoint; every other application
 	// verb is DNS-only. Route those to DNS up front rather than letting
 	// the API primary reject them and relying on the fallback.
-	if am, ok := req.(*AppMessage); ok && am != nil && !IsSyncFamily(am.TypeToken) &&
+	if am, ok := req.(*AppMessage); ok && am != nil && !isSyncFamily(am.TypeToken) &&
 		primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
 		primary = tm.DNSTransport
 	}
@@ -332,7 +332,7 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 			// application-level rejection; report it as a retryable
 			// error so the caller's queue retries (the pre-C2
 			// DNSTransport.Sync contract).
-			if resp.Status == ConfirmFailed && IsSyncFamily(r.TypeToken) {
+			if resp.Status == ConfirmFailed && isSyncFamily(r.TypeToken) {
 				return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID,
 					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
 			}
@@ -464,8 +464,8 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *Peer) (*PingResp
 	return pingResp, nil
 }
 
-// IsTransportSupported checks if a transport mechanism is enabled.
-func (tm *TransportManager) IsTransportSupported(mechanism string) bool {
+// isTransportSupported checks if a transport mechanism is enabled.
+func (tm *TransportManager) isTransportSupported(mechanism string) bool {
 	return isIn(tm.supportedMechanisms, mechanism)
 }
 

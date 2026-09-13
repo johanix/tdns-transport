@@ -35,6 +35,11 @@ func (b *Backend) Name() string {
 	return "jose"
 }
 
+// Envelope returns the label of a JWS(JWE) envelope.
+func (b *Backend) Envelope() crypto.Envelope {
+	return crypto.EnvelopeJOSE
+}
+
 // GenerateKeypair generates a new JOSE keypair (P-256 ECDSA)
 func (b *Backend) GenerateKeypair() (crypto.PrivateKey, crypto.PublicKey, error) {
 	// Generate P-256 ECDSA key

@@ -54,11 +54,11 @@ type DNSTransport struct {
 	// SecureWrapper handles optional JWS/JWE encryption for payloads
 	SecureWrapper *SecurePayloadWrapper
 
-	// chunkMode: "edns0" or "query"; when "query", payload is stored and NOTIFY sent without EDNS0
-	chunkMode      string
-	chunkGet       func(qname string) ([]byte, uint8, bool)
-	chunkSet       func(qname string, payload []byte, format uint8)
-	chunkSetChunks func(qname string, chunks []*core.CHUNK)
+	// chunkMode: "edns0" or "query"; when "query", the payload's CHUNK
+	// records are kept in chunkStore and the NOTIFY is sent without an
+	// EDNS0 payload; the receiver fetches them (ServeChunkQueries answers).
+	chunkMode  string
+	chunkStore ChunkStore
 	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
@@ -119,11 +119,9 @@ type DNSTransportConfig struct {
 
 	// ChunkMode: "edns0" (default) = payload in EDNS0 option; "query" = store payload, send NOTIFY without EDNS0; receiver fetches via CHUNK query
 	ChunkMode string
-	// For ChunkMode "query": optional get/set for payload store (keyed by qname). If nil, query mode is effectively disabled.
-	// Format: FormatJSON=1, FormatJWT=2 (from core package)
-	ChunkPayloadGet       func(qname string) ([]byte, uint8, bool)
-	ChunkPayloadSet       func(qname string, payload []byte, format uint8)
-	ChunkPayloadSetChunks func(qname string, chunks []*core.CHUNK)
+	// ChunkStore holds the stored records in query mode; nil means an
+	// in-memory store with a five-minute TTL. Ignored in edns0 mode.
+	ChunkStore ChunkStore
 	// ChunkQueryEndpoint: for query mode, the address (host:port) where this agent answers CHUNK queries
 	ChunkQueryEndpoint string
 	// ChunkQueryEndpointInNotify: when true, include ChunkQueryEndpoint in NOTIFY via EDNS0 option 65005; when false, receiver uses static config (e.g. combiner.agents[].address)
@@ -153,9 +151,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		pendingConfirmations:       make(map[string]*pendingOperation),
 		ConfirmationChan:           make(chan *IncomingConfirmation, 100),
 		chunkMode:                  cfg.ChunkMode,
-		chunkGet:                   cfg.ChunkPayloadGet,
-		chunkSet:                   cfg.ChunkPayloadSet,
-		chunkSetChunks:             cfg.ChunkPayloadSetChunks,
+		chunkStore:                 cfg.ChunkStore,
 		chunkQueryEndpoint:         cfg.ChunkQueryEndpoint,
 		chunkQueryEndpointInNotify: cfg.ChunkQueryEndpointInNotify,
 		chunkMaxSize:               cfg.ChunkMaxSize,
@@ -168,7 +164,17 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		t.SecureWrapper = NewSecurePayloadWrapper(cfg.PayloadCrypto)
 	}
 
+	// Query mode keeps the records it will serve
+	if t.chunkMode == "query" && t.chunkStore == nil {
+		t.chunkStore = newMemChunkStore(5 * time.Minute)
+	}
+
 	return t
+}
+
+// ChunkStore returns the store of query-mode records; nil in edns0 mode.
+func (t *DNSTransport) ChunkStore() ChunkStore {
+	return t.chunkStore
 }
 
 // Name returns the transport name for logging.
@@ -220,22 +226,8 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create hello payload using typed struct from core package
-	var zone string
-	if len(req.SharedZones) > 0 {
-		zone = req.SharedZones[0] // Use first shared zone
-	}
-
-	payload := &core.AgentHelloPost{
-		MessageType:  core.AgentMsgHello,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Zone:         zone,
-		Time:         req.Timestamp,
-		// Deprecated fields not set (omitempty)
-	}
-
-	payloadJSON, err := json.Marshal(payload)
+	// The hello payload (wire_own.go; the first shared zone is the hello's zone)
+	payloadJSON, err := json.Marshal(buildHelloPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Hello", peer.ID,
 			fmt.Errorf("failed to marshal hello payload: %w", err), false)
@@ -275,28 +267,16 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create beat payload using typed struct from core package
-	// Get shared zones from peer
 	// Shared zones come from the application (C7): transport keeps no zone
 	// knowledge on the peer.
-	sharedZones := req.Zones
-
-	if len(sharedZones) == 0 {
+	if len(req.Zones) == 0 {
 		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)
 	} else {
-		lgTransport().Debug("including shared zones in beat", "count", len(sharedZones), "peer", peer.ID, "zones", sharedZones)
+		lgTransport().Debug("including shared zones in beat", "count", len(req.Zones), "peer", peer.ID, "zones", req.Zones)
 	}
 
-	payload := &core.AgentBeatPost{
-		MessageType:  core.AgentMsgBeat,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Time:         req.Timestamp,
-		Zones:        sharedZones, // Include shared zones for authorization
-		Gossip:       req.Gossip,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
+	// The beat payload (wire_own.go)
+	payloadJSON, err := json.Marshal(buildBeatPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Beat", peer.ID,
 			fmt.Errorf("failed to marshal beat payload: %w", err), false)
@@ -316,7 +296,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	}
 
 	if resp.Status == ConfirmSuccess {
-		peer.RecordMechanismBeatSent("DNS")
+		peer.recordMechanismBeatSent("DNS")
 	}
 
 	return &BeatResponse{
@@ -339,15 +319,8 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	distributionID := GenerateDistributionID()
 	qname := t.buildNotifyQNAME(distributionID)
 
-	// Create ping payload using typed struct from core package
-	payload := &core.AgentPingPost{
-		MessageType:  core.AgentMsgPing,
-		MyIdentity:   req.SenderID,
-		YourIdentity: peer.ID,
-		Nonce:        req.Nonce,
-		Time:         req.Timestamp,
-	}
-	payloadJSON, err := json.Marshal(payload)
+	// The ping payload (wire_own.go)
+	payloadJSON, err := json.Marshal(buildPingPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID,
 			fmt.Errorf("failed to marshal ping payload: %w", err), false)
@@ -357,30 +330,31 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	finalPayload := payloadJSON
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
 			return nil, NewTransportError("DNS", "Ping", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	if t.distributionAdd != nil {
 		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
+	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
 	if useQueryMode {
-		// Prepare manifest + data chunks via distrib framework
+		// Prepare manifest + data chunks; the manifest names the payload's envelope
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize,
+			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
 		if err != nil {
 			return nil, NewTransportError("DNS", "Ping", peer.ID,
 				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
 		}
-		t.chunkSetChunks(chunkQueryQname, allChunks)
+		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
 	}
 
 	m := new(dns.Msg)
@@ -467,7 +441,7 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
-				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				decrypted, err := sw.unwrapIncoming(peerID, data)
 				if err != nil {
 					return nil, fmt.Errorf("decryption of ping confirm failed: %w", err)
 				}
@@ -532,13 +506,13 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	finalPayload := payloadJSON
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payloadJSON)
 		if err != nil {
 			return NewTransportError("DNS", "Confirm", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	// Create NOTIFY message
@@ -563,7 +537,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 
-	peer.Stats.RecordMessageSent("confirm")
+	peer.Stats.recordMessageSent("confirm")
 	return nil
 }
 
@@ -575,30 +549,31 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	finalPayload := payload
 	var payloadFormat uint8 = core.FormatJSON
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payload)
 		if err != nil {
 			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
 		}
 		finalPayload = encrypted
-		payloadFormat = core.FormatJWT
+		payloadFormat = t.SecureWrapper.Envelope()
 	}
 
 	if t.distributionAdd != nil {
 		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkSetChunks != nil
+	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
 	if useQueryMode {
-		// Prepare manifest + data chunks via distrib framework
+		// Prepare manifest + data chunks; the manifest names the payload's envelope
 		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
 		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize, nil)
+			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize,
+			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
 		if err != nil {
 			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
 				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
 		}
-		t.chunkSetChunks(chunkQueryQname, allChunks)
+		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
 	}
 
 	// Create NOTIFY message
@@ -665,7 +640,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	}
 
 	// Record sent message statistics
-	peer.Stats.RecordMessageSent(opType)
+	peer.Stats.recordMessageSent(opType)
 
 	if t.distributionMarkCompleted != nil {
 		t.distributionMarkCompleted(qname)
@@ -740,7 +715,7 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 			}
 			data := chunkOpt.Data
 			if chunkOpt.Format == EnvelopeJOSE && sw != nil {
-				decrypted, err := sw.UnwrapIncoming(peerID, data)
+				decrypted, err := sw.unwrapIncoming(peerID, data)
 				if err != nil {
 					continue
 				}
@@ -755,9 +730,9 @@ func extractConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePayloadWr
 	return nil
 }
 
-// HandleIncomingConfirmation processes an incoming confirmation from the DNS responder.
+// handleIncomingConfirmation processes an incoming confirmation from the DNS responder.
 // This should be called by the DNS message handler when a confirmation NOTIFY is received.
-func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation) {
+func (t *DNSTransport) handleIncomingConfirmation(confirm *IncomingConfirmation) {
 	t.pendingMu.RLock()
 	pending, exists := t.pendingConfirmations[confirm.DistributionID]
 	t.pendingMu.RUnlock()
@@ -928,11 +903,11 @@ type DnsPingConfirmPayload struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
-// FetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
+// fetchChunkViaQuery queries the given DNS server for qname CHUNK and returns the first CHUNK RR's Data and Format.
 // Used by the receiver in chunk_mode=query when NOTIFY has no EDNS0 payload.
-// FetchChunkRR sends a CHUNK query and returns the full CHUNK RR from the response.
-// This is the low-level method; FetchChunkViaQuery is a convenience wrapper.
-func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname string) (*core.CHUNK, error) {
+// fetchChunkRR sends a CHUNK query and returns the full CHUNK RR from the response.
+// This is the low-level method; fetchChunkViaQuery is a convenience wrapper.
+func (t *DNSTransport) fetchChunkRR(ctx context.Context, serverAddr, qname string) (*core.CHUNK, error) {
 	if host, port, err := net.SplitHostPort(serverAddr); err != nil {
 		if host != "" {
 			serverAddr = net.JoinHostPort(host, "53")
@@ -969,10 +944,10 @@ func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname strin
 	return nil, fmt.Errorf("no CHUNK RR in response from %s", serverAddr)
 }
 
-// FetchChunkViaQuery sends a CHUNK query and returns the payload data and format.
-// Convenience wrapper around FetchChunkRR.
-func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
-	chunk, err := t.FetchChunkRR(ctx, serverAddr, qname)
+// fetchChunkViaQuery sends a CHUNK query and returns the payload data and format.
+// Convenience wrapper around fetchChunkRR.
+func (t *DNSTransport) fetchChunkViaQuery(ctx context.Context, serverAddr, qname string) ([]byte, uint8, error) {
+	chunk, err := t.fetchChunkRR(ctx, serverAddr, qname)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -52,17 +52,12 @@ type AppMessage struct {
 	FireAndForget bool
 }
 
-// Token returns the application verb of an incoming message: TypeToken
-// when set, else the legacy Type. Both carry the same value during
-// Stage C; TypeToken becomes the only one at C6.
+// Token returns the verb of an incoming message; "" for a nil message.
 func (m *IncomingMessage) Token() string {
 	if m == nil {
 		return ""
 	}
-	if m.TypeToken != "" {
-		return m.TypeToken
-	}
-	return m.Type
+	return m.TypeToken
 }
 
 // App returns the message as the opaque carrier.
@@ -90,10 +85,10 @@ type AppResponse struct {
 	Truncated      bool
 }
 
-// IsSyncFamily reports whether a verb is one of the zone-data verbs whose
+// isSyncFamily reports whether a verb is one of the zone-data verbs whose
 // application-level rejection the sender treats as a retryable failure
 // (the pre-C2 DNSTransport.Sync contract).
-func IsSyncFamily(token string) bool {
+func isSyncFamily(token string) bool {
 	switch token {
 	case "sync", "update", "rfi":
 		return true
@@ -152,7 +147,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 	finalPayload := payload
 	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
-		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payload)
+		encrypted, err := t.SecureWrapper.wrapOutgoing(peer.ID, payload)
 		if err != nil {
 			return NewTransportError("DNS", opType, peer.ID,
 				fmt.Errorf("encryption required but failed: %w", err), false)
@@ -179,7 +174,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 		return NewTransportError("DNS", opType, peer.ID,
 			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
-	peer.Stats.RecordMessageSent(opType)
+	peer.Stats.recordMessageSent(opType)
 	return nil
 }
 
@@ -192,71 +187,50 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	if msg == nil || msg.TypeToken == "" {
 		return nil, NewTransportError("API", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)
 	}
-	if !IsSyncFamily(msg.TypeToken) {
-		// Retryable: the verb exists, only this mechanism cannot carry it,
-		// so TransportManager.Send may fall back to DNS (it also routes
-		// DNS-only verbs to DNS up front; this is the belt to that brace).
+	if !isSyncFamily(msg.TypeToken) {
+		// Retryable: the verb exists, only this mechanism cannot carry it
+		// to every receiver in the field (older ones accept the sync
+		// family only on /msg), so TransportManager.Send may fall back to
+		// DNS (it also routes DNS-only verbs to DNS up front; this is the
+		// belt to that brace).
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
 			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken), true)
 	}
-	url, err := apiURL(peer, "/sync")
+	url, err := apiURL(peer, "/msg")
 	if err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID, err, false)
 	}
-	// The sync-family payload is the application's; transport reads only
-	// the fields the API body needs, without importing the application's
-	// types (C4).
-	var app struct {
-		OriginatorID string              `json:"OriginatorID"`
-		Zone         string              `json:"Zone"`
-		Records      map[string][]string `json:"records"`
-		Operations   json.RawMessage     `json:"operations"`
-		RfiType      string              `json:"RfiType"`
-		Time         time.Time           `json:"Time"`
-	}
-	if err := json.Unmarshal(msg.Payload, &app); err != nil {
-		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
-			fmt.Errorf("application payload is not a sync-family message: %w", err), false)
-	}
-	// Same contract as the DNS mechanism: transport generates the
-	// correlation id when the application left it empty, and the response
-	// carries the id that was actually sent.
+	// The payload goes as it is: it is the application's own JSON, the
+	// same bytes the DNS mechanism would carry, and the receiver parses it
+	// with the application's parser (cleanup plan step 5).
 	distributionID := msg.DistributionID
 	if distributionID == "" {
 		distributionID = GenerateDistributionID()
 	}
-	apiReq := &apiSyncRequest{
-		MessageType:    msg.TypeToken,
-		OriginatorID:   app.OriginatorID,
-		YourIdentity:   peer.ID,
-		Zone:           app.Zone,
-		SyncType:       "UNKNOWN",
-		Records:        app.Records,
-		Operations:     app.Operations,
-		DistributionID: distributionID,
-		RfiType:        app.RfiType,
-		Timestamp:      app.Time.Unix(),
-	}
-	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
+	respBody, err := t.doRequest(ctx, "POST", url, msg.Payload)
 	if err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID, err, true)
 	}
-	var apiResp apiSyncResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+	var reply apiReply
+	if err := json.Unmarshal(respBody, &reply); err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
 			fmt.Errorf("failed to unmarshal response: %w", err), false)
 	}
 	status := ConfirmSuccess
-	if apiResp.Error {
+	message := reply.Msg
+	if !reply.accepted() {
 		status = ConfirmFailed
+		if reply.ErrorMsg != "" {
+			message = reply.ErrorMsg
+		}
 	}
 	return &AppResponse{
-		ResponderID:    apiResp.Identity,
+		ResponderID:    reply.responderOf(peer),
 		Scope:          msg.Scope,
 		TypeToken:      msg.TypeToken,
 		DistributionID: distributionID,
 		Status:         status,
-		Message:        apiResp.Msg,
+		Message:        message,
 		Timestamp:      time.Now(),
 	}, nil
 }

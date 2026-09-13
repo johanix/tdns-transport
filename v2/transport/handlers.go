@@ -33,9 +33,8 @@ func HandleConfirmation(ctx *MessageContext) error {
 	status := parseConfirmStatus(confirm.Status)
 
 	// Forward to transport's reliable message queue (marks distribution as confirmed).
-	// Two-value type assertion: ok is false if "transport" key is missing or wrong type.
-	if transport, ok := ctx.Data["transport"].(*DNSTransport); ok && transport != nil {
-		transport.HandleIncomingConfirmation(&IncomingConfirmation{
+	if transport := ctx.DNSTransport(); transport != nil {
+		transport.handleIncomingConfirmation(&IncomingConfirmation{
 			DistributionID: confirm.DistributionID,
 			PeerID:         confirm.SenderID,
 			Status:         status,
@@ -51,10 +50,8 @@ func HandleConfirmation(ctx *MessageContext) error {
 		})
 	}
 
-	// Forward confirmation detail to SynchedDataEngine
-	type confirmCallback = func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
-	if cb, ok := ctx.Data["on_confirmation_received"].(confirmCallback); ok && cb != nil && confirm.DistributionID != "" {
+	// Forward confirmation detail to the application's consumer
+	if cb := ctx.ConfirmationCallback(); cb != nil && confirm.DistributionID != "" {
 		cb(confirm.DistributionID, confirm.SenderID, status,
 			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.IgnoredRecords, confirm.Truncated, confirm.Nonce)
 	}
@@ -63,28 +60,28 @@ func HandleConfirmation(ctx *MessageContext) error {
 	return nil
 }
 
-// HandlePing processes ping messages and sends immediate response.
-func HandlePing(ctx *MessageContext) error {
-	lgTransport().Info("HandlePing: enter", "peer", ctx.PeerID, "distrib", ctx.DistributionID,
-		"payload_len", len(ctx.ChunkPayload), "chunk_crypted", ctx.ChunkCrypted, "sig_valid", ctx.SignatureValid)
+// handlePing processes ping messages and sends immediate response.
+func handlePing(ctx *MessageContext) error {
+	lgTransport().Info("handlePing: enter", "peer", ctx.PeerID, "distrib", ctx.DistributionID,
+		"payload_len", len(ctx.ChunkPayload), "wire_envelope", envelopeString(ctx.wireEnvelope()))
 
 	// Log the raw payload for debugging (truncate if long)
 	payloadStr := string(ctx.ChunkPayload)
 	if len(payloadStr) > 500 {
 		payloadStr = payloadStr[:500] + "..."
 	}
-	lgTransport().Debug("HandlePing: raw payload", "payload", payloadStr)
+	lgTransport().Debug("handlePing: raw payload", "payload", payloadStr)
 
 	// Get the pre-parsed message from context (set by RouteViaRouter)
-	incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
+	incomingMsg, ok := ctx.Incoming()
 	if ok {
-		lgTransport().Debug("HandlePing: pre-parsed message", "type", incomingMsg.Type, "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
+		lgTransport().Debug("handlePing: pre-parsed message", "type", incomingMsg.Token(), "sender", incomingMsg.SenderID, "zone", incomingMsg.Zone)
 		// Use pre-parsed message for type check
-		if incomingMsg.Type != "ping" {
-			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Type)
+		if incomingMsg.Token() != "ping" {
+			return fmt.Errorf("invalid message type for ping handler: %s", incomingMsg.Token())
 		}
 	} else {
-		lgTransport().Debug("HandlePing: no pre-parsed incoming_message in context")
+		lgTransport().Debug("handlePing: no pre-parsed incoming_message in context")
 	}
 
 	// Parse the ping message using DnsPingPayload (handles both standard and legacy field names)
@@ -93,7 +90,7 @@ func HandlePing(ctx *MessageContext) error {
 		return fmt.Errorf("failed to parse ping: %w (payload: %s)", err, payloadStr)
 	}
 
-	lgTransport().Debug("HandlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
+	lgTransport().Debug("handlePing: parsed ping", "type", ping.Type, "msgtype", ping.MessageType,
 		"nonce", ping.Nonce, "sender", ping.SenderID, "myid", ping.MyIdentity)
 
 	if !ok && ping.Type != "ping" && ping.MessageType != "ping" {
@@ -104,9 +101,8 @@ func HandlePing(ctx *MessageContext) error {
 		return fmt.Errorf("ping has empty nonce (payload: %s)", payloadStr)
 	}
 
-	// Get local identity from context (set by RouteViaRouter).
-	// Two-value form: localID defaults to "" if key missing or wrong type.
-	localID, _ := ctx.Data["local_id"].(string)
+	// Local identity, set by RouteViaRouter; "" when it is not known.
+	localID := ctx.LocalID()
 
 	// Create confirmation response matching DnsPingConfirmPayload format
 	confirmation := &DnsPingConfirmPayload{
@@ -124,65 +120,56 @@ func HandlePing(ctx *MessageContext) error {
 	}
 
 	// Store confirmation in context for response middleware
-	ctx.Data["response"] = confirmPayload
-	ctx.Data["ping_nonce"] = ping.Nonce
-
-	// Route to MsgQs for peer liveness tracking (response already sent synchronously)
-	ctx.Data["message_type"] = "ping"
+	ctx.SetResponsePayload(confirmPayload)
+	ctx.SetHandledType("ping")
 
 	lgTransport().Debug("ping processed", "peer", ctx.PeerID, "nonce", ping.Nonce)
 	return nil
 }
 
-// HandleHello processes hello messages for peer introduction.
-func HandleHello(ctx *MessageContext) error {
+// handleHello processes hello messages for peer introduction.
+func handleHello(ctx *MessageContext) error {
 	lgTransport().Debug("processing hello", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by agent RouteViaRouter)
-	helloMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
+	// The parsed message, stored by RouteViaRouter before the router was
+	// entered; a router entered without it is misused.
+	helloMsg, ok := ctx.Incoming()
 	if !ok {
-		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
-		helloMsg = ParseIncomingMessage(ctx.ChunkPayload)
-		if helloMsg == nil {
-			return fmt.Errorf("failed to parse hello payload")
-		}
+		return fmt.Errorf("hello handler: no parsed message in context")
 	}
 
-	if helloMsg.Type != "hello" {
-		return fmt.Errorf("invalid message type for hello handler: %s", helloMsg.Type)
+	if helloMsg.Token() != "hello" {
+		return fmt.Errorf("invalid message type for hello handler: %s", helloMsg.Token())
 	}
 
-	// Store for routing to hsyncengine
-	ctx.Data["message_type"] = "hello"
-	ctx.Data["incoming_message"] = helloMsg
+	// Store for the callback to the application
+	ctx.SetIncoming(helloMsg)
+	ctx.SetHandledType("hello")
 
 	lgTransport().Debug("hello processed", "peer", ctx.PeerID)
 	return nil
 }
 
-// HandleBeat processes heartbeat messages.
+// handleBeat processes heartbeat messages.
 // Works for both agent and combiner — the confirm response is always constructed,
 // and the RouteToCallback middleware hands the message to the application for further processing.
-func HandleBeat(ctx *MessageContext) error {
+func handleBeat(ctx *MessageContext) error {
 	lgTransport().Debug("processing beat", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
-	// Get the pre-parsed message from context (set by agent RouteViaRouter)
-	beatMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage)
+	// The parsed message, stored by RouteViaRouter before the router was
+	// entered; a router entered without it is misused.
+	beatMsg, ok := ctx.Incoming()
 	if !ok {
-		// Not pre-parsed: parse from raw payload (handles both standard and legacy field names)
-		beatMsg = ParseIncomingMessage(ctx.ChunkPayload)
-		if beatMsg == nil {
-			return fmt.Errorf("failed to parse beat payload")
-		}
+		return fmt.Errorf("beat handler: no parsed message in context")
 	}
 
-	if beatMsg.Type != "beat" {
-		return fmt.Errorf("invalid message type for beat handler: %s", beatMsg.Type)
+	if beatMsg.Token() != "beat" {
+		return fmt.Errorf("invalid message type for beat handler: %s", beatMsg.Token())
 	}
 
-	// Store for routing to hsyncengine (agent middleware picks this up; combiner ignores it)
-	ctx.Data["message_type"] = "beat"
-	ctx.Data["incoming_message"] = beatMsg
+	// Store for the callback to the application
+	ctx.SetIncoming(beatMsg)
+	ctx.SetHandledType("beat")
 
 	// Construct confirm response with optional gossip (used by both agent and combiner)
 	confirmPayload := struct {
@@ -201,7 +188,7 @@ func HandleBeat(ctx *MessageContext) error {
 	}
 
 	// Include our gossip for the sender in the response
-	if gossipFn, ok := ctx.Data["gossip_for_peer"].(func(string) json.RawMessage); ok {
+	if gossipFn := ctx.GossipForPeer(); gossipFn != nil {
 		confirmPayload.Gossip = gossipFn(ctx.PeerID)
 	}
 
@@ -209,60 +196,20 @@ func HandleBeat(ctx *MessageContext) error {
 	if err != nil {
 		lgTransport().Error("failed to marshal beat confirm", "err", err)
 	} else {
-		ctx.Data["response"] = payloadBytes
+		ctx.SetResponsePayload(payloadBytes)
 	}
 
 	lgTransport().Debug("beat processed", "peer", ctx.PeerID)
 	return nil
 }
 
-// ParseIncomingMessage parses a raw JSON payload into an IncomingMessage.
-// Handles both standard format (MessageType/OriginatorID) and legacy format (type/sender_id).
-// Returns nil if parsing fails.
-func ParseIncomingMessage(payload []byte) *IncomingMessage {
-	var fields struct {
-		MessageType  string `json:"MessageType"`
-		Type         string `json:"type"`
-		OriginatorID string `json:"OriginatorID"` // Sync/update messages
-		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
-		SenderID     string `json:"sender_id"`
-		Zone         string `json:"Zone"`
-		LegacyZone   string `json:"zone"`
-	}
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return nil
-	}
-	msgType := fields.MessageType
-	if msgType == "" {
-		msgType = fields.Type
-	}
-	senderID := fields.OriginatorID
-	if senderID == "" {
-		senderID = fields.MyIdentity
-	}
-	if senderID == "" {
-		senderID = fields.SenderID
-	}
-	zone := fields.Zone
-	if zone == "" {
-		zone = fields.LegacyZone
-	}
-	return &IncomingMessage{
-		Type:      msgType,
-		TypeToken: msgType,
-		SenderID:  senderID,
-		Zone:      zone,
-		Payload:   payload,
-	}
-}
-
-// DefaultUnsupportedHandler returns a handler for message types that have no
+// defaultUnsupportedHandler returns a handler for message types that have no
 // registered handler. Instead of returning an error (which causes SERVFAIL),
 // it sends a clean REFUSED response with an error payload explaining that the
 // message type is not supported.
-func DefaultUnsupportedHandler(ctx *MessageContext) error {
+func defaultUnsupportedHandler(ctx *MessageContext) error {
 	msgType := "unknown"
-	if mt, ok := ctx.Data["unhandled_message_type"].(string); ok {
+	if mt, ok := ctx.unhandledType(); ok {
 		msgType = mt
 	}
 
@@ -287,78 +234,25 @@ func DefaultUnsupportedHandler(ctx *MessageContext) error {
 		return fmt.Errorf("failed to marshal unsupported-type error response: %w", err)
 	}
 
-	ctx.Data["response"] = payloadBytes
-	ctx.Data["response_rcode"] = dns.RcodeRefused
+	ctx.SetResponsePayload(payloadBytes)
+	ctx.SetResponseRcode(dns.RcodeRefused)
 	return nil
 }
 
-// encryptResponsePayload encrypts a response payload if SecureWrapper is available in ctx.Data.
-// Returns the (possibly encrypted) payload and the appropriate format byte.
+// encryptResponsePayload encrypts a response payload if the context carries
+// an enabled SecureWrapper. Returns the (possibly encrypted) payload and the
+// appropriate format byte.
 func encryptResponsePayload(ctx *MessageContext, payload []byte) ([]byte, uint8) {
-	if sw, ok := ctx.Data["secure_wrapper"].(*SecurePayloadWrapper); ok && sw != nil && sw.IsEnabled() {
-		if peerID, ok := ctx.Data["response_peer_id"].(string); ok && peerID != "" {
-			if encrypted, err := sw.WrapOutgoing(peerID, payload); err == nil {
-				return encrypted, core.FormatJWT
+	if sw := ctx.SecureWrapper(); sw != nil && sw.IsEnabled() {
+		if peerID := ctx.responsePeerID(); peerID != "" {
+			if encrypted, err := sw.wrapOutgoing(peerID, payload); err == nil {
+				return encrypted, sw.Envelope()
 			} else {
 				lgTransport().Error("response encryption failed", "peer", peerID, "err", err)
 			}
 		}
 	}
 	return payload, core.FormatJSON
-}
-
-// SendResponseMiddleware sends the DNS response after all handlers complete.
-// This middleware should be the outermost one (last to wrap, first to execute on return).
-func SendResponseMiddleware(w dns.ResponseWriter, msg *dns.Msg) MiddlewareFunc {
-	return func(ctx *MessageContext, next MessageHandlerFunc) error {
-		// Execute the handler chain
-		err := next(ctx)
-
-		// Determine response code
-		rcode := dns.RcodeSuccess
-		if err != nil {
-			lgTransport().Error("handler error", "err", err)
-			rcode = dns.RcodeServerFailure
-		}
-
-		// Check for explicit response_rcode (set by default handler, etc.)
-		if rc, ok := ctx.Data["response_rcode"].(int); ok {
-			rcode = rc
-		}
-
-		// Check for response payload (unified key for all message types)
-		if response, ok := ctx.Data["response"]; ok {
-			if payload, ok := response.([]byte); ok {
-				payload, format := encryptResponsePayload(ctx, payload)
-				return sendChunkResponse(w, msg, payload, format, rcode)
-			}
-		}
-
-		// Build a generic EDNS0 confirmation for all other message types (hello, beat, etc).
-		// The sender requires an EDNS0 CHUNK confirmation to distinguish "message received
-		// and processed" from a bare DNS ACK (which could come from any DNS server).
-		if rcode == dns.RcodeSuccess {
-			confirmPayload := struct {
-				Type           string `json:"type"`
-				DistributionID string `json:"distribution_id"`
-				Status         string `json:"status"`
-				Message        string `json:"message"`
-				Timestamp      int64  `json:"timestamp"`
-			}{
-				Type:           "confirm",
-				DistributionID: ctx.DistributionID,
-				Status:         "ok",
-				Message:        "received",
-				Timestamp:      time.Now().Unix(),
-			}
-			payloadBytes, marshalErr := json.Marshal(confirmPayload)
-			if marshalErr == nil {
-				payloadBytes, format := encryptResponsePayload(ctx, payloadBytes)
-				return sendChunkResponse(w, msg, payloadBytes, format, rcode)
-			}
-		}
-		return sendStandardResponse(w, msg, rcode)
-	}
 }
 
 // sendChunkResponse sends a DNS response with CHUNK payload in EDNS0.
@@ -405,14 +299,14 @@ func RouteToCallback(fn func(*IncomingMessage)) MiddlewareFunc {
 		}
 
 		// A verb with no registered handler was answered REFUSED by
-		// DefaultUnsupportedHandler. It must not also be delivered to the
+		// defaultUnsupportedHandler. It must not also be delivered to the
 		// application: before this guard an agent processed an "update"
 		// it had just refused on the wire (C0.5 dispatch gate).
-		if _, unhandled := ctx.Data["unhandled_message_type"]; unhandled {
+		if _, unhandled := ctx.unhandledType(); unhandled {
 			return nil
 		}
 
-		if incomingMsg, ok := ctx.Data["incoming_message"].(*IncomingMessage); ok {
+		if incomingMsg, ok := ctx.Incoming(); ok {
 			fn(incomingMsg)
 		}
 

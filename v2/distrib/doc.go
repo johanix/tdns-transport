@@ -1,40 +1,11 @@
-// Package distrib provides a generic CHUNK-based distribution framework
-// for reliable delivery over DNS.
+// Package distrib splits a payload into CHUNK records and reassembles it:
+// a manifest record (sequence 0, with the payload inline when it fits)
+// followed by numbered data records. The DNS mechanism uses it in query
+// mode, where the receiver fetches the records instead of reading the
+// payload from the NOTIFY's EDNS0 option.
 //
-// This package implements the core infrastructure for distributing encrypted
-// payloads via DNS CHUNK records, including:
-//
-//   - Distribution lifecycle management (pending, confirmed, failed, expired)
-//   - JWS(JWE()) transport encoding/decoding
-//   - CHUNK manifest creation and parsing (JSON and JWT formats)
-//   - Confirmation protocol handling
-//   - Persistence interfaces for distribution tracking
-//
-// # Distribution Pattern
-//
-// The distribution pattern applies to any reliable delivery over DNS:
-//
-//  1. Sender creates distribution record (pending state)
-//  2. Sender sends CHUNK records via DNS
-//  3. Sender sends NOTIFY to receiver
-//  4. Receiver fetches CHUNKs
-//  5. Receiver processes payload
-//  6. Receiver sends confirmation NOTIFY
-//  7. Sender marks distribution confirmed
-//
-// # Use Cases
-//
-//   - KDC → KRS (key distribution)
-//   - Agent A → Agent B (zone sync via HSYNC)
-//   - Future: Any reliable delivery over DNS
-//
-// # Package Organization
-//
-//   - types.go: Core types (OperationEntry, DistributionMetadata, etc.)
-//   - transport.go: JWS(JWE()) encoding/decoding functions
-//   - manifest.go: CHUNK manifest operations (JSON format)
-//   - manifest_jwt.go: JWT manifest format (standards-compliant)
-//   - tracker.go: DistributionTracker interface
-//   - confirmation.go: Confirmation protocol helpers
-//   - persistence.go: DistributionStore interface and SQL schema
+// The distribution lifecycle, tracker and store interfaces, the JWT
+// manifest and the JWS(JWE) transport encoder that once lived here had no
+// caller and were removed in the 2026-09 transport cleanup (step 7); the
+// transport's own PayloadCrypto is the one place a payload is wrapped.
 package distrib

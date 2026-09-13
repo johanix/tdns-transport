@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 func TestCheckEnvelope(t *testing.T) {
 	for _, e := range []uint8{EnvelopeUnknown, EnvelopeNone, EnvelopeJOSE} {
 		if err := checkEnvelope(e); err != nil {
-			t.Errorf("%s: %v", EnvelopeString(e), err)
+			t.Errorf("%s: %v", envelopeString(e), err)
 		}
 	}
 	if err := checkEnvelope(EnvelopeCOSE); err == nil || !strings.Contains(err.Error(), "not implemented") {
@@ -25,17 +26,29 @@ func TestCheckEnvelope(t *testing.T) {
 func TestUnwrapIncomingFromPeerEnvelope_noCrypto(t *testing.T) {
 	w := NewSecurePayloadWrapper(nil)
 	plain := []byte(`{"MessageType":"sync"}`)
-	if out, err := w.UnwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeNone); err != nil || string(out) != string(plain) {
+	if out, err := w.unwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeNone); err != nil || string(out) != string(plain) {
 		t.Fatalf("none: out=%q err=%v", out, err)
 	}
-	if _, err := w.UnwrapIncomingFromPeerEnvelope([]byte("eyJhbGciOi..."), "a.", EnvelopeJOSE); err == nil {
+	if _, err := w.unwrapIncomingFromPeerEnvelope([]byte("eyJhbGciOi..."), "a.", EnvelopeJOSE); err == nil {
 		t.Fatal("jose without crypto must fail")
 	}
-	if _, err := w.UnwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeCOSE); err == nil {
+	if _, err := w.unwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeCOSE); err == nil {
 		t.Fatal("cose must fail")
 	}
-	if out, err := w.UnwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeUnknown); err != nil || string(out) != string(plain) {
+	if out, err := w.unwrapIncomingFromPeerEnvelope(plain, "a.", EnvelopeUnknown); err != nil || string(out) != string(plain) {
 		t.Fatalf("unlabelled plain: out=%q err=%v", out, err)
+	}
+}
+
+// With payload crypto on, plaintext is refused whether it is labelled none
+// or arrives unlabelled: an unsigned payload proves nothing about its sender.
+func TestUnwrapIncomingFromPeerEnvelope_cryptoOnRefusesPlaintext(t *testing.T) {
+	_, receiver := seamPair(t)
+	plain := []byte(`{"MessageType":"sync","OriginatorID":"a.example."}`)
+	for _, e := range []uint8{EnvelopeNone, EnvelopeUnknown} {
+		if out, err := receiver.unwrapIncomingFromPeerEnvelope(plain, "a.example.", e); !errors.Is(err, ErrPlaintextRefused) {
+			t.Errorf("%s plaintext with crypto on: out=%q err=%v, want ErrPlaintextRefused", envelopeString(e), out, err)
+		}
 	}
 }
 

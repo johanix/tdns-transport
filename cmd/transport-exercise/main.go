@@ -10,7 +10,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +20,8 @@ import (
 	"github.com/johanix/tdns-transport/v2/crypto"
 	_ "github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -28,6 +32,7 @@ func main() {
 	ok = testMiddleware() && ok
 	ok = testCryptoBackend() && ok
 	ok = testDiscovery() && ok
+	ok = testReceivePipeline() && ok
 
 	if ok {
 		fmt.Println("\nPASS: all transport-exercise checks passed")
@@ -223,10 +228,30 @@ func testCryptoBackend() bool {
 // key is refused. No network is touched.
 func testDiscovery() bool {
 	fmt.Println("--- Discovery ---")
+	// Payload crypto is what makes a verification key mandatory for a
+	// discovered DNS endpoint; a consumer without crypto accepts any
+	// endpoint. Exercise the documented contract: with crypto on.
+	backend, err := crypto.GetBackend("jose")
+	if err != nil {
+		fmt.Printf("  FAIL: get JOSE backend: %v\n", err)
+		return false
+	}
+	priv, pub, err := backend.GenerateKeypair()
+	if err != nil {
+		fmt.Printf("  FAIL: generate keypair: %v\n", err)
+		return false
+	}
+	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{Backend: backend, Enabled: true})
+	if err != nil {
+		fmt.Printf("  FAIL: payload crypto: %v\n", err)
+		return false
+	}
+	pc.SetLocalKeys(priv, pub)
 	tm := transport.NewTransportManager(&transport.TransportManagerConfig{
 		LocalID:             "exercise.example.",
 		ControlZone:         "mp-control.example.",
 		SupportedMechanisms: []string{"dns"},
+		PayloadCrypto:       pc,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -248,9 +273,9 @@ func testDiscovery() bool {
 	}
 	fmt.Println("  OK: known peer returned without discovery")
 
-	// A discovered endpoint without a verification key is refused (the
-	// receive path needs the key to decrypt), and the completion seam
-	// does not fire for it.
+	// A discovered DNS endpoint without a verification key is refused when
+	// payload crypto is on (the receive path needs the key to decrypt), and
+	// the completion seam does not fire for it.
 	fired := false
 	tm.OnPeerDiscovered = func(p *transport.Peer) { fired = true }
 	err = tm.RegisterDiscoveredPeer(&transport.DiscoveryResult{
@@ -263,5 +288,114 @@ func testDiscovery() bool {
 		return false
 	}
 	fmt.Println("  OK: endpoint without verification key refused; OnPeerDiscovered not fired")
+	return true
+}
+
+// parseExercisePayload is the minimum a consumer must give transport as
+// ChunkNotifyHandler.ParseApp: the verb and the sender identity, read from
+// the consumer's own payload format. Transport has no parser of its own;
+// its own verbs (hello, beat, ping, confirm) arrive through this one too.
+func parseExercisePayload(distributionID string, payload []byte, sourceAddr string) (*transport.IncomingMessage, error) {
+	var fields struct {
+		Verb   string `json:"MessageType"`
+		Sender string `json:"MyIdentity"`
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, err
+	}
+	if fields.Verb == "" {
+		return nil, fmt.Errorf("no verb in payload")
+	}
+	return &transport.IncomingMessage{
+		TypeToken:      fields.Verb,
+		SenderID:       fields.Sender,
+		DistributionID: distributionID,
+		Payload:        payload,
+		ReceivedAt:     time.Now(),
+		SourceAddr:     sourceAddr,
+	}, nil
+}
+
+// captureWriter is a dns.ResponseWriter that keeps the reply.
+type captureWriter struct {
+	reply *dns.Msg
+}
+
+func (w *captureWriter) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 53}
+}
+func (w *captureWriter) RemoteAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 2), Port: 5300}
+}
+func (w *captureWriter) WriteMsg(m *dns.Msg) error { w.reply = m; return nil }
+func (w *captureWriter) Write([]byte) (int, error) { return 0, fmt.Errorf("raw write not supported") }
+func (w *captureWriter) Close() error              { return nil }
+func (w *captureWriter) TsigStatus() error         { return nil }
+func (w *captureWriter) TsigTimersOnly(bool)       {}
+func (w *captureWriter) Hijack()                   {}
+
+// testReceivePipeline drives a NOTIFY(CHUNK) through the receive pipeline
+// with the minimal parser above and no payload crypto: the ping is routed
+// to transport's own handler and the DNS response carries its inline
+// confirmation in the EDNS0 CHUNK option.
+func testReceivePipeline() bool {
+	fmt.Println("--- Receive pipeline ---")
+	tm := transport.NewTransportManager(&transport.TransportManagerConfig{
+		LocalID:             "exercise.example.",
+		ControlZone:         "mp-control.example.",
+		SupportedMechanisms: []string{"dns"},
+	})
+	if err := transport.InitializeRouter(tm.Router, &transport.RouterConfig{PeerRegistry: tm.PeerRegistry}); err != nil {
+		fmt.Printf("  FAIL: InitializeRouter: %v\n", err)
+		return false
+	}
+	tm.ChunkHandler.ParseApp = parseExercisePayload
+
+	payload := []byte(`{"MessageType":"ping","MyIdentity":"peer.example.","nonce":"n-1"}`)
+	qname := "d1.peer.example."
+	notify := new(dns.Msg)
+	notify.SetNotify(qname)
+	notify.Question = []dns.Question{{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET}}
+	notify.SetEdns0(4096, true)
+	notify.IsEdns0().Option = append(notify.IsEdns0().Option, edns0.CreateChunkOption(core.FormatJSON, nil, payload))
+
+	w := &captureWriter{}
+	if err := tm.ChunkHandler.RouteViaRouter(context.Background(), qname, notify, w); err != nil {
+		fmt.Printf("  FAIL: RouteViaRouter: %v\n", err)
+		return false
+	}
+	if w.reply == nil || w.reply.Rcode != dns.RcodeSuccess {
+		fmt.Printf("  FAIL: no NOERROR reply: %v\n", w.reply)
+		return false
+	}
+	opt := w.reply.IsEdns0()
+	if opt == nil {
+		fmt.Println("  FAIL: reply carries no EDNS0")
+		return false
+	}
+	var confirm string
+	for _, o := range opt.Option {
+		if local, ok := o.(*dns.EDNS0_LOCAL); ok && local.Code == edns0.EDNS0_CHUNK_OPTION_CODE {
+			chunk, err := edns0.ParseChunkOption(local)
+			if err != nil {
+				fmt.Printf("  FAIL: reply CHUNK option: %v\n", err)
+				return false
+			}
+			confirm = string(chunk.Data)
+		}
+	}
+	if !strings.Contains(confirm, `"ping_confirm"`) || !strings.Contains(confirm, `"n-1"`) {
+		fmt.Printf("  FAIL: inline confirmation %q lacks the ping echo\n", confirm)
+		return false
+	}
+	fmt.Println("  OK: ping routed through the pipeline; inline confirmation echoed the nonce")
+
+	// Without a parser the pipeline refuses to run at all.
+	tm.ChunkHandler.ParseApp = nil
+	if err := tm.ChunkHandler.RouteViaRouter(context.Background(), qname, notify, &captureWriter{}); err == nil {
+		fmt.Println("  FAIL: pipeline ran without a parser")
+		return false
+	}
+	fmt.Println("  OK: pipeline refuses to run without a parser")
 	return true
 }

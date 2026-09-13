@@ -31,6 +31,10 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 		// middleware chain (authorization, crypto, stats) and the per-verb
 		// handlers registered by InitializeRouter.
 		chunkHandler := transport.NewChunkNotifyHandler(controlZone, localID, dnsTransport)
+		// The application parses its own payloads; transport has no parser.
+		// The parser must at least read the verb and the sender identity,
+		// for transport's own verbs too (see cmd/transport-exercise).
+		chunkHandler.ParseApp = parseMyPayload
 		router := transport.NewDNSMessageRouter()
 		// Confirmations: a role that sends confirmed distributions (agent,
 		// auditor) must register the confirm handler, or confirmation
@@ -74,7 +78,7 @@ agent initialization (e.g., in tdns-agent/main.go or agent setup):
 	}
 
 	func processIncomingDNSMessage(msg *transport.IncomingMessage) {
-		switch msg.Type {
+		switch msg.Token() {
 		case "hello":
 			// Parse and handle hello
 			payload, _ := transport.ParseHelloPayload(msg.Payload)
