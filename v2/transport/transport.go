@@ -11,6 +11,8 @@ import (
 	"context"
 	"crypto"
 	"encoding/json"
+	"net"
+	"strconv"
 	"time"
 )
 
@@ -161,9 +163,15 @@ type Address struct {
 
 func (a Address) String() string {
 	if a.Path != "" {
-		return a.Transport + "://" + a.Host + ":" + string(rune(a.Port)) + a.Path
+		return a.Transport + "://" + a.HostPort() + a.Path
 	}
-	return a.Host + ":" + string(rune(a.Port))
+	return a.HostPort()
+}
+
+// HostPort is the address in the form a dialer takes: "192.0.2.1:53",
+// "[::1]:8055" for an IPv6 host.
+func (a Address) HostPort() string {
+	return net.JoinHostPort(a.Host, strconv.Itoa(int(a.Port)))
 }
 
 // TransportError represents an error from the transport layer.

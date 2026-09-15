@@ -164,7 +164,7 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 	if opt := m.IsEdns0(); opt != nil {
 		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
 	}
-	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	dnsAddr := addr.HostPort()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return NewTransportError("DNS", opType, peer.ID,
