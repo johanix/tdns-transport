@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sendTransport is a Transport whose Ping and SendApp fail with err (or
@@ -105,6 +107,44 @@ func TestSendFallbackOutcomes(t *testing.T) {
 	dns, api = &sendTransport{name: "DNS"}, &sendTransport{name: "API"}
 	if _, err := sendWith(ctx, peer, &HelloRequest{}, dns, api); err == nil || dns.calls+api.calls != 0 {
 		t.Errorf("unsupported type: err %v, calls %d", err, dns.calls+api.calls)
+	}
+}
+
+// TestSendDNSOnlyVerbHasNoAPIFallback runs Send over the real transports
+// against a peer that refuses every connection. A verb only DNS carries
+// fails over DNS alone; a sync-family verb still tries both mechanisms.
+func TestSendDNSOnlyVerbHasNoAPIFallback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // nothing listens on port: every dial is refused
+
+	tm := &TransportManager{
+		APITransport: NewAPITransport(&APITransportConfig{LocalID: "me.example.", DefaultTimeout: 2 * time.Second}),
+		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "me.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
+	}
+	peer := NewPeer("peer.example.")
+	peer.APIEndpoint = fmt.Sprintf("https://127.0.0.1:%d", port)
+	addr := &Address{Host: "127.0.0.1", Port: uint16(port), Transport: "tcp"}
+	peer.SetDiscoveryAddress(addr)
+	peer.SetMechanismAddress("DNS", addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// SelectTransport picks API; Send routes the DNS-only verb to DNS and
+	// gives it no fallback.
+	_, err = tm.Send(ctx, peer, &AppMessage{TypeToken: "keystate", Payload: []byte(`{}`)})
+	if err == nil || !strings.Contains(err.Error(), "(DNS: ") || strings.Contains(err.Error(), "API: ") {
+		t.Errorf("DNS-only verb: %v", err)
+	}
+
+	// A sync-family verb keeps its fallback: API first, then DNS.
+	_, err = tm.Send(ctx, peer, &AppMessage{TypeToken: "sync", Payload: []byte(`{}`)})
+	if err == nil || !strings.Contains(err.Error(), "(API: ") || !strings.Contains(err.Error(), "; DNS: ") {
+		t.Errorf("sync-family verb: %v", err)
 	}
 }
 

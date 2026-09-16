@@ -301,9 +301,11 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // mechanism, each outcome mattering. Use SendAll for them (D1).)
 //
 // Returns the response (one of *AppResponse, *PingResponse) or an error if both transports failed or the
-// message type is unsupported. When every transport tried has failed, the
-// error names each mechanism with its error and wraps them all: errors.Is
-// and errors.As match any of them, the primary's first.
+// message type is unsupported. A verb only DNS carries has no API fallback.
+// When every transport tried has failed, the error names each mechanism
+// with its error and wraps each one: errors.Is matches any of them, and
+// errors.As returns the first match, the primary's error before the
+// fallback's.
 //
 // Bite 3 of the transport refactor early-bites plan; see
 // tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
@@ -317,9 +319,11 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	}
 	// Only the sync family has an API endpoint; every other application
 	// verb is DNS-only. Route those to DNS up front rather than letting
-	// the API primary reject them and relying on the fallback.
-	if am, ok := req.(*AppMessage); ok && am != nil && !isSyncFamily(am.TypeToken) &&
-		primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
+	// the API primary reject them and relying on the fallback, and give
+	// them no API fallback: API would only refuse the verb.
+	am, isApp := req.(*AppMessage)
+	dnsOnly := isApp && am != nil && !isSyncFamily(am.TypeToken)
+	if dnsOnly && primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
 		primary = tm.DNSTransport
 	}
 
@@ -327,7 +331,7 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	var fallback Transport
 	if primary == tm.APITransport && tm.DNSTransport != nil {
 		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil {
+	} else if primary == tm.DNSTransport && tm.APITransport != nil && !dnsOnly {
 		fallback = tm.APITransport
 	}
 	return sendWith(ctx, peer, req, primary, fallback)
