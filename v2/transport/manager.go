@@ -301,7 +301,11 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 // mechanism, each outcome mattering. Use SendAll for them (D1).)
 //
 // Returns the response (one of *AppResponse, *PingResponse) or an error if both transports failed or the
-// message type is unsupported.
+// message type is unsupported. A verb only DNS carries has no API fallback.
+// When every transport tried has failed, the error names each mechanism
+// with its error and wraps each one: errors.Is matches any of them, and
+// errors.As returns the first match, the primary's error before the
+// fallback's.
 //
 // Bite 3 of the transport refactor early-bites plan; see
 // tdns-mp/docs/2026-04-25-transport-refactor-early-bites.md.
@@ -310,20 +314,50 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 		return nil, fmt.Errorf("Send: peer is nil")
 	}
 	primary := tm.SelectTransport(peer)
+	if primary == nil {
+		return nil, fmt.Errorf("Send: no usable transport for peer %s (%s)", peer.ID, tm.noTransportReason(peer))
+	}
 	// Only the sync family has an API endpoint; every other application
 	// verb is DNS-only. Route those to DNS up front rather than letting
-	// the API primary reject them and relying on the fallback.
-	if am, ok := req.(*AppMessage); ok && am != nil && !isSyncFamily(am.TypeToken) &&
-		primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
+	// the API primary reject them and relying on the fallback, and give
+	// them no API fallback: API would only refuse the verb.
+	am, isApp := req.(*AppMessage)
+	dnsOnly := isApp && am != nil && !isSyncFamily(am.TypeToken)
+	if dnsOnly && primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
 		primary = tm.DNSTransport
 	}
 
-	dispatch := func(t Transport) (interface{}, error) {
-		if t == nil {
-			return nil, fmt.Errorf("no transport selected")
-		}
-		switch r := req.(type) {
-		case *AppMessage:
+	// The fallback is the one that isn't the primary.
+	var fallback Transport
+	if primary == tm.APITransport && tm.DNSTransport != nil {
+		fallback = tm.DNSTransport
+	} else if primary == tm.DNSTransport && tm.APITransport != nil && !dnsOnly {
+		fallback = tm.APITransport
+	}
+	return sendWith(ctx, peer, req, primary, fallback)
+}
+
+// noTransportReason says, per mechanism, why SelectTransport found no
+// transport for peer.
+func (tm *TransportManager) noTransportReason(peer *Peer) string {
+	apiWhy, dnsWhy := "peer has no endpoint", "peer has no address"
+	if tm.APITransport == nil {
+		apiWhy = "not enabled"
+	}
+	if tm.DNSTransport == nil {
+		dnsWhy = "not enabled"
+	}
+	return "API: " + apiWhy + "; DNS: " + dnsWhy
+}
+
+// sendWith is Send's primary-then-fallback over the given transports
+// (fallback nil: there is none). It is separate from the manager's
+// concrete transport fields so that tests can inject fakes.
+func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallback Transport) (interface{}, error) {
+	var dispatch func(t Transport) (interface{}, error)
+	switch r := req.(type) {
+	case *AppMessage:
+		dispatch = func(t Transport) (interface{}, error) {
 			resp, err := t.SendApp(ctx, peer, r)
 			if err != nil {
 				return nil, err
@@ -337,7 +371,9 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
 			}
 			return resp, nil
-		case *PingRequest:
+		}
+	case *PingRequest:
+		dispatch = func(t Transport) (interface{}, error) {
 			resp, err := t.Ping(ctx, peer, r)
 			if err != nil {
 				return nil, err
@@ -349,44 +385,41 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 					fmt.Errorf("ping not acknowledged by %s", peer.ID), true)
 			}
 			return resp, nil
-		default:
-			return nil, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
 		}
+	default:
+		return nil, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
 	}
 
-	if primary != nil {
-		resp, err := dispatch(primary)
-		if err == nil {
-			return resp, nil
-		}
-		// Don't fall back on non-retryable errors. The same problem
-		// (e.g. missing crypto key, no address, marshal failure) will
-		// hit the alternate transport identically — falling back just
-		// turns a clear error into a confusing one. Errors not wrapped
-		// in *TransportError are treated as fall-back-eligible (safe
-		// default for unaudited code paths).
-		var te *TransportError
-		if errors.As(err, &te) && !te.Retryable {
-			slog.Debug("primary transport failed with non-retryable error, not falling back",
-				"transport", primary.Name(), "peer", peer.ID, "err", err)
-			return nil, err
-		}
-		slog.Debug("primary transport failed, trying fallback",
-			"transport", primary.Name(), "peer", peer.ID, "err", err)
+	resp, primaryErr := dispatch(primary)
+	if primaryErr == nil {
+		return resp, nil
 	}
+	// Don't fall back on non-retryable errors. The same problem
+	// (e.g. missing crypto key, no address, marshal failure) will
+	// hit the alternate transport identically — falling back just
+	// turns a clear error into a confusing one. Errors not wrapped
+	// in *TransportError are treated as fall-back-eligible (safe
+	// default for unaudited code paths).
+	var te *TransportError
+	if errors.As(primaryErr, &te) && !te.Retryable {
+		slog.Debug("primary transport failed with non-retryable error, not falling back",
+			"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
+		return nil, primaryErr
+	}
+	if fallback == nil {
+		return nil, fmt.Errorf("Send: all transports failed for peer %s (%s: %w)",
+			peer.ID, primary.Name(), primaryErr)
+	}
+	slog.Debug("primary transport failed, trying fallback",
+		"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
 
-	// Pick the fallback (the one that isn't the primary).
-	var fallback Transport
-	if primary == tm.APITransport && tm.DNSTransport != nil {
-		fallback = tm.DNSTransport
-	} else if primary == tm.DNSTransport && tm.APITransport != nil {
-		fallback = tm.APITransport
+	resp, fallbackErr := dispatch(fallback)
+	if fallbackErr == nil {
+		return resp, nil
 	}
-	if fallback != nil {
-		return dispatch(fallback)
-	}
-
-	return nil, fmt.Errorf("Send: all transports failed for peer %s", peer.ID)
+	// The fallback's error alone would hide why the primary failed.
+	return resp, fmt.Errorf("Send: all transports failed for peer %s (%s: %w; %s: %w)",
+		peer.ID, primary.Name(), primaryErr, fallback.Name(), fallbackErr)
 }
 
 // GetQueueStats returns RMQ statistics.
