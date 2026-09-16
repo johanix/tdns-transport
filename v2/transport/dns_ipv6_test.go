@@ -55,7 +55,11 @@ func TestDNSPingToIPv6Peer(t *testing.T) {
 		_ = receiver.RouteViaRouter(context.Background(), r.Question[0].Name, r, w)
 	})}
 	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
 
 	sender := NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: zone, ChunkMode: "edns0", Timeout: 2 * time.Second})
 	peer := NewPeer("b.example.")
