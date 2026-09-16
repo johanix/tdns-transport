@@ -379,7 +379,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		}
 	}
 
-	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	dnsAddr := addr.HostPort()
 	sendTime := time.Now()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	rtt := time.Since(sendTime)
@@ -530,7 +530,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	}
 
 	// Send NOTIFY to peer
-	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	dnsAddr := addr.HostPort()
 	_, _, err = t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return NewTransportError("DNS", "Confirm", peer.ID,
@@ -626,7 +626,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	}()
 
 	// Send NOTIFY to peer
-	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	dnsAddr := addr.HostPort()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return nil, NewTransportError("DNS", opType, peer.ID,
