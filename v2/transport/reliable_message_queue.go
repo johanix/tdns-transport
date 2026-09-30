@@ -8,6 +8,16 @@
  * delivered when the recipient becomes ready. Failed deliveries are retried
  * with exponential backoff.
  *
+ * A send that the recipient acknowledges is not the end of the message:
+ * the acknowledgement only says the message arrived. The recipient's
+ * final word (SUCCESS, FAILED, REJECTED or IGNORED) comes later as a
+ * confirmation, and MarkConfirmed closes the entry. Until then the entry
+ * waits, and when the wait runs out the same message, same distribution
+ * ID and nonce, goes again, with the wait doubling up to a cap, until a
+ * final confirmation or the message's expiry. A PENDING from the
+ * recipient (MarkPending) starts the wait over. Recipients are idempotent
+ * per distribution ID, so a repeat costs at worst an extra confirmation.
+ *
  * See tdns/docs/reliable-message-delivery-architecture.md for full design.
  */
 package transport
@@ -73,6 +83,7 @@ type pendingMessage struct {
 	Message      *OutgoingMessage
 	State        MessageState
 	AttemptCount int
+	Resends      int // Sends after the first, each for want of a final confirmation
 	LastAttempt  time.Time
 	NextAttempt  time.Time // Scheduled time for next delivery attempt
 	LastError    string
@@ -84,6 +95,7 @@ type QueueStats struct {
 	ByState        map[string]int `json:"by_state"`
 	ByPriority     map[string]int `json:"by_priority"`
 	TotalDelivered int            `json:"total_delivered"`
+	TotalResent    int            `json:"total_resent"`
 	TotalFailed    int            `json:"total_failed"`
 	TotalExpired   int            `json:"total_expired"`
 	OldestAge      time.Duration  `json:"oldest_age_seconds"`
@@ -97,6 +109,7 @@ type PendingMessageInfo struct {
 	Priority       string `json:"priority"`
 	State          string `json:"state"`
 	AttemptCount   int    `json:"attempt_count"`
+	Resends        int    `json:"resends,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	ExpiresAt      string `json:"expires_at"`
 	NextAttempt    string `json:"next_attempt"`
@@ -120,7 +133,8 @@ func pendingKey(distID string, recipientID string) string {
 //   - Checks if recipient is ready before attempting delivery
 //   - Sends via the configured sendFunc
 //   - Retries with exponential backoff on failure
-//   - Tracks confirmations via distribution ID
+//   - Waits for the recipient's final confirmation (MarkConfirmed) and
+//     sends the message again when the wait runs out
 //   - Expires messages after a configurable timeout
 type ReliableMessageQueue struct {
 	mu sync.RWMutex
@@ -139,13 +153,15 @@ type ReliableMessageQueue struct {
 
 	// Statistics
 	totalDelivered int
+	totalResent    int
 	totalFailed    int
 	totalExpired   int
 
 	// Configuration
 	baseBackoff       time.Duration // Initial retry interval (default: 2s)
 	maxBackoff        time.Duration // Maximum retry interval (default: 60s)
-	confirmTimeout    time.Duration // How long to wait for confirmation after send (default: 30s)
+	confirmTimeout    time.Duration // Wait for the final confirmation before sending again (default: 2m)
+	maxConfirmWait    time.Duration // Cap on that wait as it doubles per resend (default: 15m)
 	expirationTimeout time.Duration // How long to keep retrying (default: 24h)
 	processInterval   time.Duration // How often to process the queue (default: 1s)
 	maxQueueSize      int           // Maximum number of pending messages (default: 10000)
@@ -156,7 +172,8 @@ type ReliableMessageQueueConfig struct {
 	IsRecipientReady  func(recipientID string) bool
 	BaseBackoff       time.Duration // Default: 2s
 	MaxBackoff        time.Duration // Default: 60s
-	ConfirmTimeout    time.Duration // Default: 30s
+	ConfirmTimeout    time.Duration // Default: 2m; the wait for a final confirmation before a resend
+	MaxConfirmWait    time.Duration // Default: 15m; the cap on that wait as it doubles
 	ExpirationTimeout time.Duration // Default: 24h
 	ProcessInterval   time.Duration // Default: 1s
 	MaxQueueSize      int           // Default: 10000
@@ -170,7 +187,8 @@ func NewReliableMessageQueue(cfg *ReliableMessageQueueConfig) *ReliableMessageQu
 
 		baseBackoff:       withDefault(cfg.BaseBackoff, 2*time.Second),
 		maxBackoff:        withDefault(cfg.MaxBackoff, 60*time.Second),
-		confirmTimeout:    withDefault(cfg.ConfirmTimeout, 30*time.Second),
+		confirmTimeout:    withDefault(cfg.ConfirmTimeout, 2*time.Minute),
+		maxConfirmWait:    withDefault(cfg.MaxConfirmWait, 15*time.Minute),
 		expirationTimeout: withDefault(cfg.ExpirationTimeout, 24*time.Hour),
 		processInterval:   withDefault(cfg.ProcessInterval, 1*time.Second),
 		maxQueueSize:      withDefaultInt(cfg.MaxQueueSize, 10000),
@@ -191,7 +209,7 @@ func (q *ReliableMessageQueue) Start(ctx context.Context) {
 		slog.Warn("reliable queue started without sendFunc, messages will not be delivered")
 	}
 
-	slog.Info("reliable queue starting", "baseBackoff", q.baseBackoff, "maxBackoff", q.maxBackoff, "expiration", q.expirationTimeout, "interval", q.processInterval)
+	slog.Info("reliable queue starting", "baseBackoff", q.baseBackoff, "maxBackoff", q.maxBackoff, "confirmTimeout", q.confirmTimeout, "maxConfirmWait", q.maxConfirmWait, "expiration", q.expirationTimeout, "interval", q.processInterval)
 
 	ticker := time.NewTicker(q.processInterval)
 	defer ticker.Stop()
@@ -263,8 +281,9 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 	return nil
 }
 
-// MarkConfirmed marks a message as successfully delivered and removes it from the queue.
-// recipientID is the identity of the original message recipient (who is confirming delivery).
+// MarkConfirmed marks a message as delivered and removes it from the queue:
+// the recipient gave its final word, so no resend follows. recipientID is
+// the identity of the original message recipient (who is confirming delivery).
 func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, recipientID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -276,11 +295,34 @@ func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, recipientID 
 		return false
 	}
 
-	slog.Info("message confirmed", "distributionID", distributionID, "recipient", pending.Message.RecipientID, "attempts", pending.AttemptCount, "age", time.Since(pending.Message.CreatedAt).Round(time.Second))
+	slog.Info("message confirmed", "distributionID", distributionID, "recipient", pending.Message.RecipientID, "attempts", pending.AttemptCount, "resends", pending.Resends, "age", time.Since(pending.Message.CreatedAt).Round(time.Second))
 
 	pending.State = MessageConfirmed
 	delete(q.pending, key)
 	q.totalDelivered++
+	return true
+}
+
+// MarkPending records that the recipient has the message and is still
+// working on it: the wait for its final confirmation starts over, so a
+// slow but live recipient is not sent the message again meanwhile. A
+// message whose last send failed is parked the same way, since the
+// recipient evidently has it. Returns false when the message is not in
+// the queue.
+func (q *ReliableMessageQueue) MarkPending(distributionID string, recipientID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	pending, exists := q.pending[pendingKey(distributionID, recipientID)]
+	if !exists {
+		return false
+	}
+	// A send in flight parks the message itself when it returns.
+	if pending.State == MessageSending {
+		return true
+	}
+	q.awaitConfirmationLocked(pending)
+	slog.Debug("recipient still working on the message, the wait starts over", "distributionID", distributionID, "recipient", recipientID, "wait", time.Until(pending.NextAttempt).Round(time.Second))
 	return true
 }
 
@@ -294,6 +336,7 @@ func (q *ReliableMessageQueue) GetStats() QueueStats {
 		ByState:        make(map[string]int),
 		ByPriority:     make(map[string]int),
 		TotalDelivered: q.totalDelivered,
+		TotalResent:    q.totalResent,
 		TotalFailed:    q.totalFailed,
 		TotalExpired:   q.totalExpired,
 	}
@@ -339,6 +382,7 @@ func (q *ReliableMessageQueue) GetPendingMessages() []PendingMessageInfo {
 			Priority:       priority,
 			State:          pm.State.String(),
 			AttemptCount:   pm.AttemptCount,
+			Resends:        pm.Resends,
 			CreatedAt:      pm.Message.CreatedAt.Format(time.RFC3339),
 			ExpiresAt:      pm.Message.ExpiresAt.Format(time.RFC3339),
 			NextAttempt:    pm.NextAttempt.Format(time.RFC3339),
@@ -393,7 +437,13 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 			continue
 		}
 
-		// Ready to send
+		// Ready to send. A delivered message whose final confirmation
+		// did not come within its wait goes again, same ID and nonce.
+		if pending.State == MessageAwaitingConfirm {
+			pending.Resends++
+			q.totalResent++
+			slog.Info("no final confirmation, sending again", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "zone", pending.Message.Zone, "resend", pending.Resends, "age", now.Sub(pending.Message.CreatedAt).Round(time.Second))
+		}
 		toSend = append(toSend, pending)
 		pending.State = MessageSending
 	}
@@ -437,6 +487,13 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// The recipient's final confirmation can arrive while the send is in
+	// flight (MarkConfirmed removed the entry), and so can the expiry.
+	// Either way the message is no longer ours to schedule.
+	if q.pending[pendingKey(msg.DistributionID, msg.RecipientID)] != pending {
+		return
+	}
+
 	pending.AttemptCount++
 	pending.LastAttempt = time.Now()
 
@@ -447,14 +504,34 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 		return
 	}
 
-	// Successfully sent and transport-level acknowledged.
-	// sendFunc returns nil only when the recipient ACKed,
-	// which is sufficient confirmation for reliable delivery purposes.
-	// Mark as confirmed and remove from queue.
-	slog.Info("message delivery confirmed", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "age", time.Since(msg.CreatedAt).Round(time.Second))
-	pending.State = MessageConfirmed
-	delete(q.pending, pendingKey(msg.DistributionID, msg.RecipientID))
-	q.totalDelivered++
+	// Sent and acknowledged at the transport level: the recipient has the
+	// message. Its final word comes later as a confirmation (MarkConfirmed);
+	// until then the message waits, and goes again if the wait runs out.
+	pending.LastError = ""
+	q.awaitConfirmationLocked(pending)
+	slog.Info("message delivered, awaiting the final confirmation", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "wait", pending.NextAttempt.Sub(pending.LastAttempt).Round(time.Second))
+}
+
+// awaitConfirmationLocked parks a delivered message until the recipient's
+// final confirmation or, failing that, its next send. Must be called with
+// q.mu held.
+func (q *ReliableMessageQueue) awaitConfirmationLocked(pending *pendingMessage) {
+	pending.State = MessageAwaitingConfirm
+	pending.NextAttempt = time.Now().Add(q.confirmWait(pending))
+}
+
+// confirmWait is how long a delivered message waits for its final
+// confirmation before it is sent again: the confirm timeout, doubled for
+// every resend so far, capped at maxConfirmWait.
+func (q *ReliableMessageQueue) confirmWait(pending *pendingMessage) time.Duration {
+	wait := q.confirmTimeout
+	for i := 0; i < pending.Resends && wait < q.maxConfirmWait; i++ {
+		wait *= 2
+	}
+	if wait > q.maxConfirmWait {
+		wait = q.maxConfirmWait
+	}
+	return wait
 }
 
 // scheduleRetryLocked calculates the next retry time using exponential backoff.
@@ -462,9 +539,9 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 // If countAsAttempt is false, uses a fixed short backoff (for "not ready" cases).
 func (q *ReliableMessageQueue) scheduleRetryLocked(pending *pendingMessage, countAsAttempt bool) {
 	if !countAsAttempt {
-		// Recipient not ready - use a fixed backoff, don't count as attempt
+		// Recipient not ready - use a fixed backoff, don't count as attempt.
+		// The state stays: a message awaiting its confirmation still is.
 		pending.NextAttempt = time.Now().Add(q.baseBackoff)
-		pending.State = MessageQueued
 		return
 	}
 
