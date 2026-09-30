@@ -83,7 +83,8 @@ type pendingMessage struct {
 	Message      *OutgoingMessage
 	State        MessageState
 	AttemptCount int
-	Resends      int // Sends after the first, each for want of a final confirmation
+	Resends      int  // Sends after the first, each for want of a final confirmation
+	HeardPending bool // A PENDING from the recipient arrived while a send was in flight
 	LastAttempt  time.Time
 	NextAttempt  time.Time // Scheduled time for next delivery attempt
 	LastError    string
@@ -317,8 +318,11 @@ func (q *ReliableMessageQueue) MarkPending(distributionID string, recipientID st
 	if !exists {
 		return false
 	}
-	// A send in flight parks the message itself when it returns.
+	// A send in flight parks the message itself when it returns, and
+	// takes the PENDING with it: the recipient has the message whatever
+	// becomes of the send's own answer.
 	if pending.State == MessageSending {
+		pending.HeardPending = true
 		return true
 	}
 	q.awaitConfirmationLocked(pending)
@@ -446,6 +450,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 		}
 		toSend = append(toSend, pending)
 		pending.State = MessageSending
+		pending.HeardPending = false
 	}
 
 	// Remove expired messages
@@ -498,8 +503,15 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 	pending.LastAttempt = time.Now()
 
 	if err != nil {
-		slog.Warn("send failed", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "err", err)
 		pending.LastError = err.Error()
+		if pending.HeardPending {
+			// The recipient answered PENDING while the send was in flight:
+			// it has the message, whatever became of the send's own answer.
+			q.awaitConfirmationLocked(pending)
+			slog.Info("send failed but the recipient answered pending, awaiting the final confirmation", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "err", err)
+			return
+		}
+		slog.Warn("send failed", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "err", err)
 		q.scheduleRetryLocked(pending, true)
 		return
 	}

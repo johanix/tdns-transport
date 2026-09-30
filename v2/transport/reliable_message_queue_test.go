@@ -64,9 +64,31 @@ func startQueue(t *testing.T, cfg *ReliableMessageQueueConfig, send func(context
 	q := NewReliableMessageQueue(cfg)
 	q.setSendFunc(send)
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go q.Start(ctx)
+	stopped := make(chan struct{})
+	go func() {
+		q.Start(ctx)
+		close(stopped)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Error("the queue did not stop within 2s of its context being cancelled")
+		}
+	})
 	return q
+}
+
+// snapshot returns the queue's view of a message, or nil when the queue
+// no longer holds it.
+func snapshot(q *ReliableMessageQueue, distID string) *PendingMessageInfo {
+	for _, m := range q.GetPendingMessages() {
+		if m.DistributionID == distID {
+			return &m
+		}
+	}
+	return nil
 }
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
@@ -125,13 +147,18 @@ func TestAnUnconfirmedMessageGoesAgainUnderTheSameIdAndNonce(t *testing.T) {
 	if a.DistributionID != b.DistributionID || a.Nonce != b.Nonce || b.Nonce == "" {
 		t.Fatalf("the resend is not the same message: %q/%q then %q/%q", a.DistributionID, a.Nonce, b.DistributionID, b.Nonce)
 	}
+	// The recorded send completes in the queue a moment after the
+	// recorder saw it: wait for the queue's own view.
+	waitFor(t, "the resend parked awaiting its confirmation", time.Second, func() bool {
+		s := snapshot(q, "d2")
+		return s != nil && s.AttemptCount == 2 && s.State == MessageAwaitingConfirm.String()
+	})
 	st := q.GetStats()
 	if st.TotalResent != 1 || st.TotalDelivered != 0 {
 		t.Fatalf("after one resend: resent %d, delivered %d", st.TotalResent, st.TotalDelivered)
 	}
-	info := q.GetPendingMessages()
-	if len(info) != 1 || info[0].Resends != 1 || info[0].AttemptCount != 2 || info[0].State != MessageAwaitingConfirm.String() {
-		t.Fatalf("pending snapshot after the resend: %+v", info)
+	if s := snapshot(q, "d2"); s.Resends != 1 || s.AttemptCount != 2 {
+		t.Fatalf("pending snapshot after the resend: %+v", *s)
 	}
 
 	// The second wait is twice the first.
@@ -213,6 +240,35 @@ func TestAPendingParksAMessageWhoseSendFailed(t *testing.T) {
 	info := q.GetPendingMessages()
 	if len(info) != 1 || info[0].State != MessageAwaitingConfirm.String() || info[0].LastError == "" {
 		t.Fatalf("after the pending: %+v", info)
+	}
+}
+
+func TestAPendingDuringAFailedSendParksTheMessage(t *testing.T) {
+	// The recipient's PENDING arrives while the send is in flight, and the
+	// send's own answer is then lost: the recipient has the message.
+	rec := &sendRecorder{fail: errors.New("notify response timed out")}
+	var q *ReliableMessageQueue
+	rec.onSend = func(msg *OutgoingMessage) { q.MarkPending(msg.DistributionID, msg.RecipientID) }
+	cfg := testQueueConfig()
+	cfg.BaseBackoff = 10 * time.Millisecond // a retry would come fast, were one scheduled
+	cfg.MaxBackoff = 10 * time.Millisecond
+	q = startQueue(t, cfg, rec.send)
+	enqueue(t, q, "d6")
+
+	waitFor(t, "the failed send", time.Second, func() bool { return rec.count() == 1 })
+	waitFor(t, "the message parked awaiting its confirmation", time.Second, func() bool {
+		s := snapshot(q, "d6")
+		return s != nil && s.State == MessageAwaitingConfirm.String()
+	})
+	time.Sleep(testConfirmTimeout / 2)
+	if n := rec.count(); n != 1 {
+		t.Fatalf("retried after a PENDING: %d sends", n)
+	}
+	if s := snapshot(q, "d6"); s == nil || s.LastError == "" {
+		t.Fatalf("the failed send's error is not kept: %+v", s)
+	}
+	if !q.MarkConfirmed("d6", "agent.example.") {
+		t.Fatal("the final confirmation found no message")
 	}
 }
 
