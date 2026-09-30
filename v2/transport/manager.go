@@ -70,6 +70,7 @@ type TransportManagerConfig struct {
 	RMQBaseBackoff       time.Duration
 	RMQMaxBackoff        time.Duration
 	RMQConfirmTimeout    time.Duration
+	RMQMaxConfirmWait    time.Duration
 	RMQExpirationTimeout time.Duration
 }
 
@@ -221,6 +222,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		BaseBackoff:       cfg.RMQBaseBackoff,
 		MaxBackoff:        cfg.RMQMaxBackoff,
 		ConfirmTimeout:    cfg.RMQConfirmTimeout,
+		MaxConfirmWait:    cfg.RMQMaxConfirmWait,
 		ExpirationTimeout: cfg.RMQExpirationTimeout,
 	})
 
