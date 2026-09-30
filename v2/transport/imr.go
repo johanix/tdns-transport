@@ -47,6 +47,20 @@ type Imr struct {
 	*tdns.Imr
 }
 
+// requireValidated refuses an answer the resolver did not DNSSEC-validate
+// when the IMR is set to require validation (imrengine
+// require-dnssec-validation). Every discovery lookup is a security-sensitive
+// one: what a peer's identity zone says about its keys and endpoints is what
+// the transport then trusts, so an Insecure or Bogus answer is not a weaker
+// answer, it is none. Without the setting the lookups take what the resolver
+// gives, as they always did.
+func (imr *Imr) requireValidated(resp *tdns.ImrResponse, rrtype, qname string) error {
+	if imr == nil || imr.Imr == nil || !imr.RequireDnssecValidation || resp == nil || resp.Validated {
+		return nil
+	}
+	return fmt.Errorf("%s at %s is not DNSSEC-validated and require-dnssec-validation is set", rrtype, qname)
+}
+
 // lookupAgentJWK looks up the JWK record for an agent identity.
 // Returns: (jwk-data, public-key, algorithm, error)
 //
@@ -72,6 +86,9 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return "", nil, "", fmt.Errorf("no JWK record found at %s", jwkQname)
+	}
+	if err := imr.requireValidated(resp, "JWK", jwkQname); err != nil {
+		return "", nil, "", err
 	}
 
 	for _, rr := range resp.RRset.RRs {
@@ -116,6 +133,9 @@ func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, 
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return nil, fmt.Errorf("no KEY record found for %s", identity)
 	}
+	if err := imr.requireValidated(resp, "KEY", identity); err != nil {
+		return nil, err
+	}
 
 	for _, rr := range resp.RRset.RRs {
 		if keyRR, ok := rr.(*dns.KEY); ok {
@@ -147,6 +167,9 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return "", "", 0, fmt.Errorf("no API URI record found at %s", apiQname)
+	}
+	if err := imr.requireValidated(resp, "URI", apiQname); err != nil {
+		return "", "", 0, err
 	}
 
 	for _, rr := range resp.RRset.RRs {
@@ -201,6 +224,9 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return "", "", 0, fmt.Errorf("no DNS URI record found at %s", dnsQname)
 	}
+	if err := imr.requireValidated(resp, "URI", dnsQname); err != nil {
+		return "", "", 0, err
+	}
 
 	for _, rr := range resp.RRset.RRs {
 		if uriRR, ok := rr.(*dns.URI); ok {
@@ -249,15 +275,15 @@ func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint1
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return nil, fmt.Errorf("no TLSA record found at %s", tlsaQname)
 	}
+	if err := imr.requireValidated(resp, "TLSA", tlsaQname); err != nil {
+		return nil, err
+	}
 
 	for _, rr := range resp.RRset.RRs {
 		if tlsaRR, ok := rr.(*dns.TLSA); ok {
 			lgTransport().Debug("found TLSA record", "qname", tlsaQname,
 				"usage", tlsaRR.Usage, "selector", tlsaRR.Selector,
 				"matchingType", tlsaRR.MatchingType, "validated", resp.Validated)
-			if imr.RequireDnssecValidation && !resp.Validated {
-				return nil, fmt.Errorf("TLSA record at %s has unvalidated DNSSEC state (require_dnssec_validation=true)", tlsaQname)
-			}
 			return tlsaRR, nil
 		}
 	}
@@ -287,6 +313,9 @@ func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) 
 
 	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 		return nil, fmt.Errorf("no SVCB record found at %s", serviceName)
+	}
+	if err := imr.requireValidated(resp, "SVCB", serviceName); err != nil {
+		return nil, err
 	}
 
 	for _, rr := range resp.RRset.RRs {
