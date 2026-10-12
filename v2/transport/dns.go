@@ -282,17 +282,14 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 			fmt.Errorf("failed to marshal beat payload: %w", err), false)
 	}
 
-	// Create and send NOTIFY(CHUNK) - beats can be fire-and-forget
+	// Create and send NOTIFY(CHUNK). A beat that fails is reported with its
+	// error, as a hello is and as the API transport reports a beat: the
+	// caller has to be able to tell a peer that refuses the beat from one
+	// that does not answer.
 	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", distributionID, payloadJSON, false)
 	if err != nil {
-		// For beats, we might want to be more lenient with errors
 		lgTransport().Warn("beat failed", "peer", peer.ID, "err", err)
-		return &BeatResponse{
-			ResponderID: peer.ID,
-			Timestamp:   time.Now(),
-			Sequence:    req.Sequence,
-			Ack:         false,
-		}, nil
+		return nil, err
 	}
 
 	if resp.Status == ConfirmSuccess {
