@@ -129,6 +129,7 @@ type apiReply struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+	Gossip       json.RawMessage // a beat's answer: the responder's gossip, as a DNS beat's confirm carries it
 }
 
 // responderOf is the identity the reply names for itself.
@@ -217,6 +218,7 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		Sequence:    req.Sequence,
 		State:       reply.Msg,
 		Ack:         ack,
+		Gossip:      reply.Gossip,
 	}, nil
 }
 
