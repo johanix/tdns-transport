@@ -73,7 +73,8 @@ func (t *APITransport) Name() string {
 // Uses peer.APIEndpoint (the discovered base URI) when available,
 // falling back to constructing from CurrentAddress().
 func apiURL(peer *Peer, path string) (string, error) {
-	if peer.APIEndpoint == "" {
+	endpoint := peer.GetAPIEndpoint()
+	if endpoint == "" {
 		// API transport requires an explicit HTTPS endpoint. Falling
 		// back to peer.CurrentAddress() (a DNS endpoint for DNS-only
 		// peers) would produce structurally invalid HTTP URLs like
@@ -82,10 +83,10 @@ func apiURL(peer *Peer, path string) (string, error) {
 		// callers a clear error instead.
 		return "", fmt.Errorf("peer %s has no API endpoint configured", peer.ID)
 	}
-	if err := requireHTTPS(peer.APIEndpoint); err != nil {
+	if err := requireHTTPS(endpoint); err != nil {
 		return "", fmt.Errorf("peer %s: %w", peer.ID, err)
 	}
-	return peer.APIEndpoint + path, nil
+	return endpoint + path, nil
 }
 
 // requireHTTPS refuses an API endpoint that is not an https URL: the HTTPS

@@ -54,6 +54,11 @@ func (s PeerState) String() string {
 }
 
 // Peer represents a remote agent that we communicate with.
+//
+// Discovery, the receive paths and the senders touch one peer from
+// different goroutines. A field that is written after the peer is shared
+// is read and written under mu: through the accessors (SetAPIEndpoint,
+// GetPreferredTransport, ...) from outside this package.
 type Peer struct {
 	mu sync.RWMutex
 
@@ -83,7 +88,8 @@ type Peer struct {
 
 	// Communication state, single-state view: kept for display and for
 	// peers that predate per-mechanism state. The send gates read
-	// Mechanisms, not these.
+	// Mechanisms, not these. SetMechanismLastHelloRecv and
+	// SetMechanismLastBeatRecv stamp the received times here too.
 	LastHelloSent     time.Time // When we last sent a hello
 	LastHelloReceived time.Time // When we last received a hello
 	LastBeatSent      time.Time // When we last sent a beat
@@ -431,9 +437,10 @@ func (p *Peer) MechanismKeyRR(name string) *dns.KEY {
 }
 
 // SetMechanismLastHelloRecv records the time a Hello was last received
-// on the named mechanism. Creates the MechanismState entry on first
-// call. Acquires p.mu for the duration of the write, so this is the
-// safe replacement for direct map indexing of p.Mechanisms[name].
+// on the named mechanism, and as the peer's LastHelloReceived. Creates
+// the MechanismState entry on first call. Acquires p.mu for the duration
+// of the write, so this is the safe replacement for direct map indexing
+// of p.Mechanisms[name].
 func (p *Peer) SetMechanismLastHelloRecv(name string, t time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -447,11 +454,12 @@ func (p *Peer) SetMechanismLastHelloRecv(name string, t time.Time) {
 		p.Mechanisms[name] = m
 	}
 	m.LastHelloRecv = t
+	p.LastHelloReceived = t
 }
 
 // SetMechanismLastBeatRecv records the time a Beat (or Ping treated as
-// liveness) was last received on the named mechanism. Same locking
-// contract as SetMechanismLastHelloRecv.
+// liveness) was last received on the named mechanism, and as the peer's
+// LastBeatReceived. Same locking contract as SetMechanismLastHelloRecv.
 func (p *Peer) SetMechanismLastBeatRecv(name string, t time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -465,6 +473,7 @@ func (p *Peer) SetMechanismLastBeatRecv(name string, t time.Time) {
 		p.Mechanisms[name] = m
 	}
 	m.LastBeatRecv = t
+	p.LastBeatReceived = t
 }
 
 // SetMechanismLastBeatSent records the time a Beat was last sent on the
@@ -719,6 +728,86 @@ func (p *Peer) SetOperationalAddress(addr *Address) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.OperationalAddr = addr
+}
+
+// SetAPIEndpoint records the URL of the peer's API transport.
+func (p *Peer) SetAPIEndpoint(uri string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.APIEndpoint = uri
+}
+
+// GetAPIEndpoint returns the URL of the peer's API transport, "" when it
+// has none.
+func (p *Peer) GetAPIEndpoint() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.APIEndpoint
+}
+
+// SetDNSEndpoint records the dns:// URL of the peer's DNS transport.
+func (p *Peer) SetDNSEndpoint(uri string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.DNSEndpoint = uri
+}
+
+// GetDNSEndpoint returns the dns:// URL of the peer's DNS transport, ""
+// when it has none.
+func (p *Peer) GetDNSEndpoint() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.DNSEndpoint
+}
+
+// SetPreferredTransport records the transport ("API" or "DNS") to try
+// first for this peer.
+func (p *Peer) SetPreferredTransport(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.PreferredTransport = name
+}
+
+// GetPreferredTransport returns the transport ("API" or "DNS") to try
+// first for this peer, "" when none is set.
+func (p *Peer) GetPreferredTransport() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.PreferredTransport
+}
+
+// setPreferredTransportIfUnset sets the preferred transport when none is
+// set yet, in one step under p.mu.
+func (p *Peer) setPreferredTransportIfUnset(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.PreferredTransport == "" {
+		p.PreferredTransport = name
+	}
+}
+
+// setTLSARecord records the TLSA certificate data (legacy top-level bytes).
+func (p *Peer) setTLSARecord(data []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.TLSARecord = data
+}
+
+// SetLastBeatReceived records the time of an inbound message from the
+// peer that names no mechanism. A message on a known mechanism goes to
+// SetMechanismLastBeatRecv, which stamps this time as well.
+func (p *Peer) SetLastBeatReceived(t time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.LastBeatReceived = t
+}
+
+// GetLastBeatReceived returns the time of the last inbound beat or other
+// message that shows the peer reaches us.
+func (p *Peer) GetLastBeatReceived() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.LastBeatReceived
 }
 
 // recordBeatSent records that a beat was sent.
