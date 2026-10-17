@@ -100,7 +100,7 @@ The hsyncengine should select transport based on peer configuration:
 
 	func (engine *HsyncEngine) selectTransport(peer *transport.Peer) transport.Transport {
 		// Check peer's preferred transport
-		switch peer.PreferredTransport {
+		switch peer.GetPreferredTransport() {
 		case "DNS":
 			if engine.dnsTransport != nil {
 				return engine.dnsTransport
@@ -112,7 +112,7 @@ The hsyncengine should select transport based on peer configuration:
 		}
 
 		// Default: try API first, then DNS
-		if engine.apiTransport != nil && peer.APIEndpoint != "" {
+		if engine.apiTransport != nil && peer.GetAPIEndpoint() != "" {
 			return engine.apiTransport
 		}
 		if engine.dnsTransport != nil && peer.CurrentAddress() != nil {

@@ -232,19 +232,20 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 // SelectTransport chooses the best transport for a peer.
 // Respects peer's PreferredTransport, falls back to API then DNS.
 func (tm *TransportManager) SelectTransport(peer *Peer) Transport {
-	switch peer.PreferredTransport {
+	apiEndpoint := peer.GetAPIEndpoint()
+	switch peer.GetPreferredTransport() {
 	case "DNS":
 		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
 			return tm.DNSTransport
 		}
 	case "API":
-		if tm.APITransport != nil && peer.APIEndpoint != "" {
+		if tm.APITransport != nil && apiEndpoint != "" {
 			return tm.APITransport
 		}
 	}
 
 	// Default: API first (more reliable), then DNS
-	if tm.APITransport != nil && peer.APIEndpoint != "" {
+	if tm.APITransport != nil && apiEndpoint != "" {
 		return tm.APITransport
 	}
 	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {

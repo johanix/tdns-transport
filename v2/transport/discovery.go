@@ -261,8 +261,8 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 			}
 			peer.SetDiscoveryAddress(addr)
 			peer.SetMechanismAddress("API", addr)
-			peer.APIEndpoint = result.APIUri
-			peer.PreferredTransport = "API"
+			peer.SetAPIEndpoint(result.APIUri)
+			peer.SetPreferredTransport("API")
 
 			lgTransport().Info("registered peer with API endpoint", "identity", result.Identity, "endpoint", result.APIUri, "address", host, "port", port)
 		}
@@ -301,10 +301,8 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 			// matching Peer.PreferredMechanism and SelectTransport's default.
 			peer.SetDiscoveryAddress(addr)
 			peer.SetMechanismAddress("DNS", addr)
-			peer.DNSEndpoint = result.DNSUri // display/diagnostics (S2)
-			if peer.PreferredTransport == "" {
-				peer.PreferredTransport = "DNS"
-			}
+			peer.SetDNSEndpoint(result.DNSUri) // display/diagnostics (S2)
+			peer.setPreferredTransportIfUnset("DNS")
 
 			lgTransport().Info("registered peer with DNS endpoint", "identity", result.Identity, "endpoint", result.DNSUri, "address", host, "port", port)
 		}
@@ -313,7 +311,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// Store TLSA for TLS verification (legacy top-level bytes; the typed
 	// record lands in the per-mechanism crypto slot below)
 	if result.TLSA != nil {
-		peer.TLSARecord = []byte(result.TLSA.Certificate)
+		peer.setTLSARecord([]byte(result.TLSA.Certificate))
 	}
 
 	// Per-mechanism outcome: ContactInfo + guarded NEEDED→KNOWN promotion +

@@ -1,6 +1,10 @@
 package transport
 
-import "testing"
+import (
+	"sync"
+	"testing"
+	"time"
+)
 
 // RegisterDiscoveredPeer with an API-only result (no DNS URI, no
 // verification key) registers and promotes the peer: the key is a
@@ -66,5 +70,51 @@ func TestRegisterDiscoveredPeer_dnsAddressAndPreference(t *testing.T) {
 	}
 	if a := peer.CurrentAddress(); a == nil || a.Host != "192.0.2.4" {
 		t.Fatalf("CurrentAddress (the DNS carrier slot) = %+v, want the DNS address", a)
+	}
+}
+
+// Two discoveries of one peer can finish at once (a hello and the retry
+// loop both look it up), while beats arrive from it and sends to it pick
+// a transport. Run under -race.
+func TestTwoDiscoveriesOfOnePeerDoNotRaceItsTraffic(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	result := &DiscoveryResult{
+		Identity:     "both.example.",
+		APIUri:       "https://api.both.example.:8443/api/v1",
+		APIAddresses: []string{"192.0.2.3"},
+		DNSUri:       "dns://dns.both.example.:8154/",
+		DNSAddresses: []string{"192.0.2.4"},
+	}
+	peer := tm.PeerRegistry.GetOrCreate("both.example.")
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			if err := tm.RegisterDiscoveredPeer(result); err != nil {
+				t.Errorf("RegisterDiscoveredPeer: %v", err)
+			}
+		})
+	}
+	for range 2 {
+		wg.Go(func() {
+			peer.SetMechanismLastBeatRecv("DNS", time.Now())
+			peer.SetLastBeatReceived(time.Now())
+		})
+	}
+	wg.Go(func() {
+		tm.SelectTransport(peer)
+		_, _ = apiURL(peer, "/beat")
+		_ = peer.GetDNSEndpoint()
+	})
+	wg.Wait()
+
+	if got := peer.GetPreferredTransport(); got != "API" {
+		t.Errorf("preferred transport = %q, want API", got)
+	}
+	if got := peer.GetAPIEndpoint(); got != result.APIUri {
+		t.Errorf("API endpoint = %q, want %q", got, result.APIUri)
+	}
+	if peer.GetLastBeatReceived().IsZero() {
+		t.Error("no beat received time recorded")
 	}
 }
