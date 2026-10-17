@@ -364,22 +364,10 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	// H8: Pre-crypto authorization check. Reject unknown senders BEFORE doing any expensive
 	// crypto or query operations. This prevents DoS attacks where an attacker sends messages
 	// with forged sender identities to force expensive decryption attempts.
-	// Note: zone is not yet known at this point (it's inside the encrypted payload), so we
-	// pass "" — the callback should check if the sender is known at all.
-	if h.IsPeerAuthorized != nil {
-		authorized, reason := h.IsPeerAuthorized(senderHint, "")
-		if !authorized {
-			count := atomic.AddUint64(&h.unsolicitedCount, 1)
-			// M18: Escalate log level when unsolicited count exceeds threshold
-			if count%unsolicitedWarnThreshold == 0 {
-				lgTransport().Warn("sustained unsolicited messages from unauthorized senders",
-					"total_count", count, "latest_peer", senderHint, "source", sourceAddr, "reason", reason)
-			} else {
-				lgTransport().Debug("rejected message from unauthorized sender",
-					"peer", senderHint, "source", sourceAddr, "reason", reason)
-			}
-			return h.sendResponse(w, msg, dns.RcodeRefused)
-		}
+	// Note: zone is not yet known at this point (it's inside the encrypted payload), so the
+	// check is whether the sender is known at all.
+	if h.senderRefused(senderHint, sourceAddr) {
+		return h.sendResponse(w, msg, dns.RcodeRefused)
 	}
 
 	// Extract CHUNK payload: first try EDNS0 (edns0 mode); if absent, fetch via CHUNK query (query mode)
@@ -455,11 +443,22 @@ const (
 // RouteAPIPayload is the receive pipeline's entry for the HTTPS mechanism:
 // the body of a POST to one of the sync API endpoints, already
 // authenticated by TLS and the application's TLSA check, and not
-// encrypted at the payload level. It is parsed with the application's
-// parser, the sender it names is authorized (at all, then for the zone),
-// the verb is routed like a NOTIFY(CHUNK)'s, and the answer goes to the
-// sink the application supplies, which shapes the HTTP response.
-func (h *ChunkNotifyHandler) RouteAPIPayload(ctx context.Context, payload []byte, sourceAddr string, sink ReplySink) error {
+// encrypted at the payload level.
+//
+// sender is the identity the connection authenticated (the client
+// certificate's). It is the transport-level sender, as the identity in a
+// NOTIFY's query name is: the message's TransportSender and PeerID, the
+// subject of the authorization and the peer the answer is built for,
+// whoever the body names as the originator. It is authorized before the
+// body is parsed, as the query name's identity is before the crypto. An
+// empty sender (a request no certificate authenticated) leaves the sender
+// to the body.
+//
+// The body is parsed with the application's parser, the sender is
+// authorized for the zone, the verb is routed like a NOTIFY(CHUNK)'s, and
+// the answer goes to the sink the application supplies, which shapes the
+// HTTP response.
+func (h *ChunkNotifyHandler) RouteAPIPayload(ctx context.Context, payload []byte, sourceAddr, sender string, sink ReplySink) error {
 	if h.Router == nil {
 		lgTransport().Error("router is nil, cannot route API message", "source", sourceAddr)
 		return sink.Fail(dns.RcodeServerFailure)
@@ -468,22 +467,54 @@ func (h *ChunkNotifyHandler) RouteAPIPayload(ctx context.Context, payload []byte
 		lgTransport().Error("no payload parser installed, cannot route API message", "source", sourceAddr)
 		return sink.Fail(dns.RcodeServerFailure)
 	}
-	return h.route(ctx, routeInput{
+	in := routeInput{
 		distributionID: GenerateDistributionID(),
 		payload:        payload,
 		envelope:       EnvelopeNone,
 		sourceAddr:     sourceAddr,
 		mechanism:      MechanismAPI,
-	}, sink)
+	}
+	if sender != "" {
+		in.senderHint = dns.Fqdn(sender)
+		if h.senderRefused(in.senderHint, sourceAddr) {
+			return sink.Fail(dns.RcodeRefused)
+		}
+	}
+	return h.route(ctx, in, sink)
+}
+
+// senderRefused asks the application whether sender may talk to this node
+// at all, before the zone is known. A refusal is counted, and logged
+// louder when refusals keep coming.
+func (h *ChunkNotifyHandler) senderRefused(sender, sourceAddr string) bool {
+	if h.IsPeerAuthorized == nil {
+		return false
+	}
+	authorized, reason := h.IsPeerAuthorized(sender, "")
+	if authorized {
+		return false
+	}
+	count := atomic.AddUint64(&h.unsolicitedCount, 1)
+	// M18: Escalate log level when unsolicited count exceeds threshold
+	if count%unsolicitedWarnThreshold == 0 {
+		lgTransport().Warn("sustained unsolicited messages from unauthorized senders",
+			"total_count", count, "latest_peer", sender, "source", sourceAddr, "reason", reason)
+	} else {
+		lgTransport().Debug("rejected message from unauthorized sender",
+			"peer", sender, "source", sourceAddr, "reason", reason)
+	}
+	return true
 }
 
 // routeInput is what the pipeline tail needs from either entry.
 type routeInput struct {
 	distributionID string
 	// senderHint is the transport-level sender when the mechanism names
-	// one before the payload is read (the NOTIFY query name); empty means
+	// one before the payload is read (the NOTIFY query name, the HTTPS
+	// client certificate), already asked about by the entry; empty means
 	// the parsed message names the sender, and the sender authorization
-	// that the DNS entry ran before decryption runs after parsing instead.
+	// the entries run before reading the payload runs after parsing
+	// instead.
 	senderHint string
 	payload    []byte // plaintext
 	envelope   uint8  // the label as received (kept on the context for the record)
@@ -510,26 +541,16 @@ func (h *ChunkNotifyHandler) route(ctx context.Context, in routeInput, sink Repl
 
 	senderHint := in.senderHint
 	if senderHint == "" {
-		// The HTTPS mechanism: the parsed message names the sender, and
-		// the "known at all" authorization the DNS entry ran before its
-		// crypto runs here.
+		// An HTTPS request no certificate authenticated: the parsed
+		// message names the sender, and the "known at all" authorization
+		// the entries run before reading the payload runs here.
 		senderHint = incomingMsg.SenderID
 		if senderHint == "" {
 			lgTransport().Warn("message names no sender", "source", in.sourceAddr, "mechanism", in.mechanism)
 			return sink.Fail(dns.RcodeFormatError)
 		}
-		if h.IsPeerAuthorized != nil {
-			if authorized, reason := h.IsPeerAuthorized(senderHint, ""); !authorized {
-				count := atomic.AddUint64(&h.unsolicitedCount, 1)
-				if count%unsolicitedWarnThreshold == 0 {
-					lgTransport().Warn("sustained unsolicited messages from unauthorized senders",
-						"total_count", count, "latest_peer", senderHint, "source", in.sourceAddr, "reason", reason)
-				} else {
-					lgTransport().Debug("rejected message from unauthorized sender",
-						"peer", senderHint, "source", in.sourceAddr, "reason", reason)
-				}
-				return sink.Fail(dns.RcodeRefused)
-			}
+		if h.senderRefused(senderHint, in.sourceAddr) {
+			return sink.Fail(dns.RcodeRefused)
 		}
 	}
 	// Set the transport-level sender — distinct from SenderID (payload OriginatorID).

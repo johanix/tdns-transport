@@ -46,10 +46,13 @@ message to the application.
 
 ChunkNotifyHandler.RouteAPIPayload is the same pipeline's entry for the
 HTTPS mechanism: the application's sync API endpoints hand it the request
-body after TLS has authenticated the peer, and it parses, authorizes,
-routes and replies exactly as for a NOTIFY, so one verb table governs both
-mechanisms. IncomingMessage.Mechanism tells the application which one a
-message arrived on.
+body and the identity TLS authenticated (the client certificate's), and it
+parses, authorizes, routes and replies exactly as for a NOTIFY, so one verb
+table governs both mechanisms. The authenticated identity is the message's
+transport-level sender, as the query name's is for a NOTIFY; the body names
+the originator, who for a forwarded message is somebody else.
+IncomingMessage.Mechanism tells the application which one a message
+arrived on.
 
 What the pipeline and the handlers exchange rides on MessageContext, through
 the typed accessors in message_context.go.

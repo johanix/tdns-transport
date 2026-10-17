@@ -20,7 +20,7 @@ type IncomingMessage struct {
 	TypeToken       string    // the verb: transport-own ("hello", "beat", "ping", "confirm") or the application's
 	DistributionID  string    // Distribution ID from QNAME (unique identifier for this CHUNK distribution)
 	SenderID        string    // Sender identity (from payload OriginatorID — original author)
-	TransportSender string    // Transport-level sender (from QNAME — who actually sent the DNS NOTIFY)
+	TransportSender string    // Transport-level sender: who actually sent it (the NOTIFY's QNAME, the HTTPS client certificate)
 	Zone            string    // Zone (for zone-scoped operations)
 	Nonce           string    // Nonce from the sync/update message (echoed in confirmation)
 	Payload         []byte    // Raw payload (JSON)
