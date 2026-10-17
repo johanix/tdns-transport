@@ -231,3 +231,36 @@ func TestAPIEmptyReplyIsNotAccepted(t *testing.T) {
 		t.Fatalf("empty reply acked a beat: %+v %v", beat, err)
 	}
 }
+
+// The answer to a beat carries the responder's gossip, as a DNS beat's
+// confirm does (tdns-mp plan decision 26): what the receiver put in the
+// reply object reaches the caller verbatim. An answer without gossip
+// yields none.
+func TestAPIBeatAnswerCarriesGossip(t *testing.T) {
+	gossip := json.RawMessage(`[{"GroupHash":"abc","Members":{"b.example.":{"Identity":"b.example."}}}]`)
+	var captured []apiCapture
+	srv := apiReceiver(t, &captured, func(path string, body []byte) interface{} {
+		if len(captured) == 1 {
+			return map[string]interface{}{"Status": "ok", "MyIdentity": "b.example.", "Msg": "Hi there!", "Error": false, "Gossip": gossip}
+		}
+		return map[string]interface{}{"Status": "ok", "MyIdentity": "b.example.", "Msg": "Hi there!", "Error": false}
+	})
+	defer srv.Close()
+	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
+	peer := apiPeer(srv.URL)
+
+	beat, err := tr.Beat(context.Background(), peer, &BeatRequest{SenderID: "a.example."})
+	if err != nil || !beat.Ack {
+		t.Fatalf("Beat: %+v %v", beat, err)
+	}
+	if !bytes.Equal(beat.Gossip, gossip) {
+		t.Errorf("the beat's answer carried gossip %s, want %s", beat.Gossip, gossip)
+	}
+	beat, err = tr.Beat(context.Background(), peer, &BeatRequest{SenderID: "a.example."})
+	if err != nil || !beat.Ack {
+		t.Fatalf("Beat: %+v %v", beat, err)
+	}
+	if len(beat.Gossip) != 0 {
+		t.Errorf("an answer without gossip yielded %s", beat.Gossip)
+	}
+}
