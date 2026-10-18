@@ -40,22 +40,43 @@ Format:
 owner TTL CLASS HSYNCPARAM key1="val1" key2="val2" ...
 ```
 
-Known keys:
+Known keys, with the key numbers
+draft-leon-dnsop-signaling-zone-owner-intent assigns them:
 
-  nsmgmt="owner|agent"          - who manages the NS RRset
-  parentsync="owner|agent"      - who handles parent synchronisation
-                                  (the mechanism is announced by the parent via DSYNC)
-  audit="yes|no"                - whether audit is enabled
-  signers="label1,label2,..."   - comma-separated list of signer labels
+  0  servers="label1,label2,..."   - providers designated to serve the zone
+  1  signers="label1,label2,..."   - providers designated to sign the zone
+  2  auditors="label1,label2,..."  - observer-only auditor labels
+  3  nsmgmt="owner|agent"          - who manages the NS RRset
+  4  parentsync="owner|agent"      - who handles parent synchronisation
+                                     (the mechanism is announced by the
+                                     parent via DSYNC)
+  5  suffix="label"                - DNS label for provider NS+glue
+  6  pubkey                        - flag: publish the zone's SIG(0) KEY at
+                                     _sig0key.<zone>._signal.<ns>
+  7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at
+                                     _dsboot.<zone>._signal.<ns>
+  8  serial="N"                    - number of the owner's instructions; the
+                                     owner raises it at every change of the
+                                     zone's HSYNC3 or HSYNCPARAM records.
+                                     Unsigned 32-bit, decimal in presentation
+                                     format, compared by serial-number
+                                     arithmetic (RFC 1982)
+
+0-32767 is the IANA-registered range and 32768-65534 is Private Use; an
+unregistered number is preserved on read-back, never acted on, and written
+as keyN in presentation format. 65535 is reserved.
 
 Example:
 
 ```
-example.com. 3600 IN HSYNCPARAM nsmgmt="agent" parentsync="agent" audit="yes" signers="netnod,cloudflare"
+example.com. 3600 IN HSYNCPARAM nsmgmt="agent" servers="alpha,echo" signers="alpha" auditors="audit"
 ```
 
 Wire format: each key=value pair is encoded as 2 bytes key code + 2 bytes
 value length + value data, sorted by key code. Same layout as SVCB/HTTPS.
+The key numbers are wire format, so they must match the draft exactly; the
+presentation order above is the draft's registry order and is not the order
+the keys appear in the RDATA.
 
 ## CHUNK
 
