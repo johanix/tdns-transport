@@ -79,10 +79,6 @@ func NewAPITransport(cfg *APITransportConfig) *APITransport {
 		tlsConfig = &tls.Config{}
 	}
 
-	if cfg.GetImr == nil {
-		lgTransport().Warn("the HTTPS client has no resolver for TLSA lookups; it checks peers against the TLSA discovery stored, which is not looked up again within its TTL")
-	}
-
 	return &APITransport{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: timeout,

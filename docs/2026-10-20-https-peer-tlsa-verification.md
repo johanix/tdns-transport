@@ -66,8 +66,8 @@ things about that TLSA:
   plain WebPKI by dropping a flag is not possible.
 - **Redirects are refused** on every per-peer client, whatever the shared
   client was given.
-- **No resolver** (`GetImr` nil) is logged at Warn when the client is made:
-  the check then has only the set discovery stored.
+- **No resolver** for a check that has a TLSA name to ask is logged at
+  Warn, at most hourly: the check then has only the set discovery stored.
 - **No fall-through to a shared client.** Where the check cannot be
   installed (a `Proxy`, a `DialTLS`, a transport that is not an
   `*http.Transport`), the send is refused with a retryable error.
@@ -83,16 +83,24 @@ things about that TLSA:
 - **Logging.** A mismatch is logged at Error at once, with the TLSA records
   held and the SPKI SHA-256 of the certificate presented, then at most once
   every ten minutes per peer. A missing TLSA is logged at Warn, at most
-  hourly per peer. A recovery after a mismatch is logged at Info.
+  hourly per peer. A failed lookup is logged at Warn, at most every ten
+  minutes per peer. A recovery after a mismatch is logged at Info. Each end
+  logs in its own words and under keys of its own (`Check` for the sending
+  end, `CheckClient` for the receiving end), so an impostor client claiming
+  a peer does not mute the sending end's report of a mismatch with it.
+- **A look past the cache that the caller gave up on** keeps its booking:
+  a client that hangs up mid-lookup cannot have the name looked up past
+  the cache as often as it likes.
 - **The per-peer clients** are keyed on the peer, and dropped with it.
 
 ## The receiving end (tdns-mp)
 
-The TLSA middleware calls the same check, so both ends follow the five
-points above. It runs once per TLS connection, and again once the verdict
-is a minute old: a burst of requests on one connection does not mean one
-resolver lookup each, and a kept-alive connection outlives a withdrawal by
-at most a minute past the TTL.
+The TLSA middleware calls the same checker (`CheckClient`), so both ends
+follow the five points above. A passed check holds for a minute for that
+peer and certificate, across connections: a burst of requests does not mean
+one resolver lookup each, and a kept-alive connection outlives a withdrawal
+found by a lookup of its own by at most a minute past the TTL. A peer whose
+set is already empty is refused at once, whatever verdict is held.
 
 ## What a failed check never does
 
@@ -105,8 +113,9 @@ mechanism, whose payloads are signed and encrypted (JOSE) end to end.
   TLSA. That is tdns-mp#56.
 - Management API clients, and tdns's own DoT, DoH and DoQ clients.
 - Peers configured with an endpoint and no discovery (a combiner's or a
-  signer's): they have no TLSA, so HTTPS to them cannot pass. tdns-mp
-  ignores such an endpoint, with a warning at load.
+  signer's): they have no TLSA, so their certificate cannot be checked and
+  HTTPS to them cannot be authenticated. tdns-mp ignores such an endpoint,
+  with a warning at load that says so.
 
 ## Tests
 

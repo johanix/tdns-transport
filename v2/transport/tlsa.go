@@ -43,7 +43,31 @@ const (
 	defaultTLSALookupTimeout   = 3 * time.Second
 	defaultTLSARecheckInterval = 5 * time.Minute
 	tlsaMismatchLogInterval    = 10 * time.Minute
+	tlsaLookupLogInterval      = 10 * time.Minute
 	tlsaWarnLogInterval        = time.Hour
+)
+
+// tlsaEnd is one end of an HTTPS connection, as the checker logs it: the
+// client checks the server it sends to, the server checks the client it
+// takes requests from. Each end logs in its own words and under keys of its
+// own, so an impostor at one end does not mute the other's report.
+type tlsaEnd struct {
+	key      string
+	mismatch string
+	noTLSA   string
+}
+
+var (
+	sendingEnd = tlsaEnd{
+		key:      "send",
+		mismatch: "the peer's certificate matches none of its TLSA records; HTTPS to it is refused",
+		noTLSA:   "no usable TLSA for the peer; HTTPS to it is not attempted (logged again in an hour)",
+	}
+	receivingEnd = tlsaEnd{
+		key:      "recv",
+		mismatch: "the client certificate presented for the peer matches none of its TLSA records; its HTTPS requests are refused",
+		noTLSA:   "no usable TLSA for the peer; its HTTPS requests are refused (logged again in an hour)",
+	}
 )
 
 // TLSAChecker checks a peer's certificate against the peer's TLSA RRset. One
@@ -80,15 +104,26 @@ func NewTLSAChecker(getImr func() *Imr) *TLSAChecker {
 	return &TLSAChecker{GetImr: getImr}
 }
 
-// Check checks cert against the TLSA RRset of peer's mechanism ("API"). It
-// passes when cert matches any usable record. A mismatch is looked at once
-// more past the resolver's cache, which may hold a set from before a
-// rotation, at most once per RecheckInterval for that name.
+// Check checks the certificate of the server the HTTPS client is sending to
+// against the TLSA RRset of peer's mechanism ("API"). It passes when cert
+// matches any usable record. A mismatch is looked at once more past the
+// resolver's cache, which may hold a set from before a rotation, at most
+// once per RecheckInterval for that name.
 //
 // The errors are ErrNoTLSA, ErrTLSAMismatch and ErrTLSALookup, wrapped. A
 // failed lookup is retryable and changes nothing; an answer replaces the set
 // held on the peer, and a denial (no TLSA at the name) empties it.
 func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, cert *x509.Certificate) error {
+	return c.check(ctx, peer, mechanism, cert, sendingEnd)
+}
+
+// CheckClient is Check for the receiving end: cert is the client
+// certificate presented for peer. It logs as the receiving end.
+func (c *TLSAChecker) CheckClient(ctx context.Context, peer *Peer, mechanism string, cert *x509.Certificate) error {
+	return c.check(ctx, peer, mechanism, cert, receivingEnd)
+}
+
+func (c *TLSAChecker) check(ctx context.Context, peer *Peer, mechanism string, cert *x509.Certificate, end tlsaEnd) error {
 	if cert == nil {
 		return fmt.Errorf("%w: %s presented no certificate", ErrTLSAMismatch, peer.ID)
 	}
@@ -97,7 +132,7 @@ func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, c
 		return err
 	}
 	if len(set.Records) == 0 {
-		c.NoteNoTLSA(peer, set.Owner)
+		c.noteNoTLSA(peer, set.Owner, end)
 		return fmt.Errorf("%w: %s (%s)", ErrNoTLSA, peer.ID, ownerOrUnknown(set.Owner))
 	}
 	if tlsaMatches(set.Records, cert) {
@@ -107,8 +142,12 @@ func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, c
 		fresh, err := c.current(ctx, peer, mechanism, true)
 		if err != nil {
 			// A lookup that failed looked at nothing: the next mismatch
-			// may look again.
-			c.recheckUndo(set.Owner)
+			// may look again. One the caller gave up on keeps the
+			// booking, or a client that hangs up mid-lookup could have
+			// the name looked up past the cache as often as it likes.
+			if ctx.Err() == nil {
+				c.recheckUndo(set.Owner)
+			}
 		} else {
 			if tlsaMatches(fresh.Records, cert) {
 				lgTransport().Info("TLSA recheck after a mismatch: the certificate matches the peer's current TLSA",
@@ -118,7 +157,7 @@ func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, c
 			set = fresh
 		}
 	}
-	c.noteMismatch(peer, set, cert)
+	c.noteMismatch(peer, set, cert, end)
 	return fmt.Errorf("%w: %s (%s): presented SPKI SHA-256 %s", ErrTLSAMismatch, peer.ID, ownerOrUnknown(set.Owner), spkiSHA256Hex(cert))
 }
 
@@ -137,6 +176,12 @@ func (c *TLSAChecker) Refresh(ctx context.Context, peer *Peer, mechanism string)
 func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string, fresh bool) (TLSASet, error) {
 	set := peer.MechanismTLSA(mechanism)
 	src := c.lookupSource()
+	if src == nil && set.Owner != "" {
+		c.logOnce("noresolver", tlsaWarnLogInterval, func() {
+			lgTransport().Warn("no resolver for the TLSA lookup (not started yet, or none given): checking against the TLSA discovery stored, which is not looked up again within its TTL",
+				"peer", peer.ID, "owner", set.Owner)
+		})
+	}
 	if src == nil || set.Owner == "" {
 		return set, nil
 	}
@@ -144,12 +189,14 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 	defer cancel()
 	ans, err := src.lookupTLSA(lctx, set.Owner, fresh)
 	if err != nil {
+		c.noteLookupFailed(peer, set.Owner, err)
 		return TLSASet{}, fmt.Errorf("%w: %s (%s): %v", ErrTLSALookup, peer.ID, set.Owner, err)
 	}
 	if !ans.Validated {
 		if src.requireValidation() {
-			return TLSASet{}, fmt.Errorf("%w: %s (%s): the answer is not DNSSEC-validated and validation is required",
-				ErrTLSALookup, peer.ID, set.Owner)
+			err := errors.New("the answer is not DNSSEC-validated and validation is required")
+			c.noteLookupFailed(peer, set.Owner, err)
+			return TLSASet{}, fmt.Errorf("%w: %s (%s): %v", ErrTLSALookup, peer.ID, set.Owner, err)
 		}
 		c.logOnce("unvalidated|"+peer.ID, tlsaWarnLogInterval, func() {
 			lgTransport().Warn("accepting a TLSA RRset that is not DNSSEC-validated, as require-dnssec-validation is off",
@@ -176,19 +223,32 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 // NoteNoTLSA logs that HTTPS to peer is not attempted for want of a TLSA:
 // at Warn, at most hourly per peer.
 func (c *TLSAChecker) NoteNoTLSA(peer *Peer, owner string) {
-	c.logOnce("notlsa|"+peer.ID, tlsaWarnLogInterval, func() {
-		lgTransport().Warn("no usable TLSA for the peer; HTTPS to it is not attempted (logged again in an hour)",
-			"peer", peer.ID, "owner", ownerOrUnknown(owner))
+	c.noteNoTLSA(peer, owner, sendingEnd)
+}
+
+func (c *TLSAChecker) noteNoTLSA(peer *Peer, owner string, end tlsaEnd) {
+	c.logOnce("notlsa|"+end.key+"|"+peer.ID, tlsaWarnLogInterval, func() {
+		lgTransport().Warn(end.noTLSA, "peer", peer.ID, "owner", ownerOrUnknown(owner))
 	})
 }
 
 // noteMismatch logs a certificate that matches none of the peer's TLSA
-// records: at Error, at once, then at most every ten minutes per peer.
-func (c *TLSAChecker) noteMismatch(peer *Peer, set TLSASet, cert *x509.Certificate) {
-	c.logOnce("mismatch|"+peer.ID, tlsaMismatchLogInterval, func() {
-		lgTransport().Error("the peer's certificate matches none of its TLSA records; HTTPS to it refused",
+// records: at Error, at once, then at most every ten minutes per peer and
+// end.
+func (c *TLSAChecker) noteMismatch(peer *Peer, set TLSASet, cert *x509.Certificate, end tlsaEnd) {
+	c.logOnce("mismatch|"+end.key+"|"+peer.ID, tlsaMismatchLogInterval, func() {
+		lgTransport().Error(end.mismatch,
 			"peer", peer.ID, "owner", ownerOrUnknown(set.Owner), "held", tlsaDigests(set.Records),
 			"presented_spki_sha256", spkiSHA256Hex(cert))
+	})
+}
+
+// noteLookupFailed logs a TLSA lookup that gave no usable answer: at Warn,
+// at most every ten minutes per peer. Each check it fails is refused.
+func (c *TLSAChecker) noteLookupFailed(peer *Peer, owner string, err error) {
+	c.logOnce("lookup|"+peer.ID, tlsaLookupLogInterval, func() {
+		lgTransport().Warn("the peer's TLSA could not be looked up; HTTPS with it fails until it can (logged again in ten minutes)",
+			"peer", peer.ID, "owner", owner, "err", err)
 	})
 }
 

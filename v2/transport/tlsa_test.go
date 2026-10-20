@@ -481,3 +481,43 @@ func TestAPIPeerClientRefusesRedirects(t *testing.T) {
 		t.Error("the peer's client follows redirects")
 	}
 }
+
+// A caller that gave up keeps the booking: a client that hangs up mid-lookup
+// cannot have the name looked up past the cache as often as it likes.
+func TestTLSARecheckTheCallerGaveUpOnKeepsTheBooking(t *testing.T) {
+	held := tlsaAnswer{Records: []*dns.TLSA{tlsaFor(otherCert(t))}, Validated: true}
+	src := &fakeTLSA{answers: []fakeAnswer{{ans: held}, {err: context.Canceled}, {ans: held}}}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	peer := withTLSA(NewPeer("b.example."), otherCert(t))
+	presented := otherCert(t)
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Check(gone, peer, "API", presented); !errors.Is(err, ErrTLSAMismatch) {
+		t.Fatalf("a check the caller gave up on: %v, want ErrTLSAMismatch", err)
+	}
+	if err := c.Check(context.Background(), peer, "API", presented); !errors.Is(err, ErrTLSAMismatch) {
+		t.Fatalf("the next check: %v, want ErrTLSAMismatch", err)
+	}
+	if got := src.lookups(); len(got) != 3 || got[0] || !got[1] || got[2] {
+		t.Errorf("lookups (fresh?) %v, want no second fresh look within the interval", got)
+	}
+}
+
+// Each end logs under keys of its own: a client presenting a certificate
+// for b that b's TLSA does not name does not mute the sending end's report
+// of a mismatch with b.
+func TestTLSAEndsLogApart(t *testing.T) {
+	c := NewTLSAChecker(nil)
+	peer := withTLSA(NewPeer("b.example."), otherCert(t))
+	if err := c.CheckClient(context.Background(), peer, "API", otherCert(t)); !errors.Is(err, ErrTLSAMismatch) {
+		t.Fatalf("an impostor client: %v, want ErrTLSAMismatch", err)
+	}
+	c.mu.Lock()
+	_, sendMuted := c.logged["mismatch|send|b.example."]
+	_, recvLogged := c.logged["mismatch|recv|b.example."]
+	c.mu.Unlock()
+	if sendMuted || !recvLogged {
+		t.Errorf("after the receiving end's mismatch: sending end muted %v, receiving end logged %v", sendMuted, recvLogged)
+	}
+}
