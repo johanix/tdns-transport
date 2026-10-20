@@ -346,8 +346,8 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 // transport SelectTransport picks (the API when the peer offers it), then
 // on the other one when that fails. A receiver that does not take
 // confirmations over HTTPS refuses the API's, and the DNS NOTIFY carries
-// it instead. When there is a fallback, the first try gets half of ctx's
-// time.
+// it instead. When the other one can reach the peer, the first try gets
+// half of ctx's time.
 //
 // A try that times out after the receiver took the confirmation sends it
 // again on the other mechanism, and the receiver gets it twice, as it
@@ -358,6 +358,19 @@ func (tm *TransportManager) Confirm(ctx context.Context, peer *Peer, req *Confir
 	}
 	_, err := tm.Send(ctx, peer, req)
 	return err
+}
+
+// reaches reports whether t has somewhere to send to peer: an endpoint
+// for the API, an address for DNS. A transport of another kind (a test's)
+// is taken to reach it.
+func reaches(t Transport, peer *Peer) bool {
+	switch t.(type) {
+	case *APITransport:
+		return peer.GetAPIEndpoint() != ""
+	case *DNSTransport:
+		return peer.CurrentAddress() != nil
+	}
+	return true
 }
 
 // halfOfDeadline is ctx with half the time it has left, or ctx itself
@@ -406,11 +419,11 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 			return resp, nil
 		}
 	case *ConfirmRequest:
-		first := fallback != nil
+		first := fallback != nil && reaches(fallback, peer)
 		dispatch = func(t Transport) (interface{}, error) {
-			// A confirmation is sent once. When there is a fallback, the
-			// primary gets half the time left, so that a peer that hangs
-			// on it leaves the fallback the other half.
+			// A confirmation is sent once. When the fallback can reach the
+			// peer, the primary gets half the time left, so that a peer
+			// that hangs on it leaves the fallback the other half.
 			actx := ctx
 			if first {
 				first = false

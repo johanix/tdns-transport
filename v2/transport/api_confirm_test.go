@@ -322,3 +322,36 @@ func TestManagerConfirmHangingAPILeavesDNSTime(t *testing.T) {
 		t.Fatalf("%d NOTIFYs, want the fallback's one", len(got))
 	}
 }
+
+// A peer that DNS alone reaches keeps all the caller's time for the NOTIFY:
+// with no endpoint for the API there is no fallback to leave time for.
+func TestManagerConfirmDNSOnlyPeerKeepsAllItsTime(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{Listener: ln, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		time.Sleep(1500 * time.Millisecond) // more than half the caller's time
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
+	tm := &TransportManager{
+		APITransport: NewAPITransport(&APITransportConfig{LocalID: "a.example."}),
+		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 3 * time.Second}),
+	}
+	peer := NewPeer("b.example.")
+	peer.SetDiscoveryAddress(&Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := tm.Confirm(ctx, peer, testConfirmRequest()); err != nil {
+		t.Fatalf("Confirm to a peer only DNS reaches: %v", err)
+	}
+}
