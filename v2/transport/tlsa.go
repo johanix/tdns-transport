@@ -91,6 +91,14 @@ type TLSAChecker struct {
 	mu        sync.Mutex
 	rechecked map[string]time.Time // by TLSA name
 	logged    map[string]time.Time // by kind and peer
+	lookups   uint64               // lookups started, numbering each
+	stored    map[tlsaSlot]uint64  // the lookup whose answer each slot holds
+}
+
+// tlsaSlot is one peer's TLSA set for one mechanism.
+type tlsaSlot struct {
+	peer      *Peer
+	mechanism string
 }
 
 // tlsaSource answers TLSA lookups: the node's resolver (*Imr), or a test's.
@@ -185,6 +193,10 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 	if src == nil || set.Owner == "" {
 		return set, nil
 	}
+	c.mu.Lock()
+	c.lookups++
+	mine := c.lookups
+	c.mu.Unlock()
 	lctx, cancel := context.WithTimeout(ctx, c.lookupTimeout())
 	defer cancel()
 	ans, err := src.lookupTLSA(lctx, set.Owner, fresh)
@@ -203,12 +215,27 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 				"peer", peer.ID, "owner", set.Owner)
 		})
 	}
+	// Lookups of one peer may overlap. An answer is stored only if no
+	// later lookup's answer is: an older answer stored after a newer
+	// withdrawal would put back the records it withdrew.
+	slot := tlsaSlot{peer, mechanism}
+	c.mu.Lock()
+	if c.stored[slot] > mine {
+		c.mu.Unlock()
+		return peer.MechanismTLSA(mechanism), nil
+	}
+	if c.stored == nil {
+		c.stored = make(map[tlsaSlot]uint64)
+	}
+	c.stored[slot] = mine
+	held := peer.MechanismTLSA(mechanism)
 	// No usable record is a withdrawal too, whether the name is gone or
 	// holds only records that cannot vouch for an agent.
-	withdrawn := len(ans.Records) == 0 && len(set.Records) > 0
+	withdrawn := len(ans.Records) == 0 && len(held.Records) > 0
 	set.Records = ans.Records
 	set.Validated = ans.Validated
 	peer.SetMechanismTLSA(mechanism, set)
+	c.mu.Unlock()
 	if withdrawn {
 		// Nothing to check a certificate against: the mechanism needs
 		// discovery again, which finds a TLSA when one is published.
@@ -218,6 +245,17 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 		peer.SetMechanismState(mechanism, PeerStateNeeded, "TLSA withdrawn")
 	}
 	return set, nil
+}
+
+// Forget drops what the checker holds for peer: the peer is gone.
+func (c *TLSAChecker) Forget(peer *Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for slot := range c.stored {
+		if slot.peer == peer {
+			delete(c.stored, slot)
+		}
+	}
 }
 
 // NoteNoTLSA logs that HTTPS to peer is not attempted for want of a TLSA:

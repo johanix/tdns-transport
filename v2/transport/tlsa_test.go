@@ -521,3 +521,55 @@ func TestTLSAEndsLogApart(t *testing.T) {
 		t.Errorf("after the receiving end's mismatch: sending end muted %v, receiving end logged %v", sendMuted, recvLogged)
 	}
 }
+
+// stepTLSA answers each lookup when the test says: a lookup sends a channel
+// on calls and waits for its answer on it.
+type stepTLSA struct{ calls chan chan fakeAnswer }
+
+func (s *stepTLSA) lookupTLSA(_ context.Context, _ string, _ bool) (tlsaAnswer, error) {
+	ch := make(chan fakeAnswer)
+	s.calls <- ch
+	a := <-ch
+	return a.ans, a.err
+}
+
+func (s *stepTLSA) requireValidation() bool { return false }
+
+// Lookups of one peer that overlap: the older answer, holding the records,
+// comes back after the newer withdrawal, and does not put them back.
+func TestTLSAOlderAnswerDoesNotUndoANewerWithdrawal(t *testing.T) {
+	cert := otherCert(t)
+	src := &stepTLSA{calls: make(chan chan fakeAnswer)}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	peer := withTLSA(NewPeer("b.example."), cert)
+
+	type result struct {
+		set TLSASet
+		err error
+	}
+	refresh := func() chan result {
+		out := make(chan result, 1)
+		go func() {
+			set, err := c.Refresh(context.Background(), peer, "API")
+			out <- result{set, err}
+		}()
+		return out
+	}
+	olderDone := refresh()
+	older := <-src.calls
+	newerDone := refresh()
+	newer := <-src.calls
+	newer <- fakeAnswer{ans: tlsaAnswer{Denied: true, Validated: true}}
+	if r := <-newerDone; r.err != nil || len(r.set.Records) != 0 {
+		t.Fatalf("the newer lookup's withdrawal: %+v %v", r.set, r.err)
+	}
+	older <- fakeAnswer{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(cert)}, Validated: true}}
+	r := <-olderDone
+	if peer.HasMechanismTLSA("API") {
+		t.Error("the older answer put back the records the newer one withdrew")
+	}
+	if r.err != nil || len(r.set.Records) != 0 {
+		t.Errorf("the older lookup returned %+v %v, want the newer, empty set", r.set, r.err)
+	}
+}

@@ -188,18 +188,31 @@ func TestRegisterDiscoveredPeer_apiWithoutTLSAIsNotUsable(t *testing.T) {
 }
 
 // A peer known on one mechanism is looked up again while another still
-// needs discovery. Without a resolver the look fails, which shows it ran.
+// needs discovery, and stays usable when that look fails: the resolver is
+// asked (and has nothing), and the known peer comes back without an error.
 func TestDiscoverPeerLooksAgainWhileAMechanismIsNeeded(t *testing.T) {
-	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	asked := 0
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), GetImr: func() *Imr { asked++; return nil }}
 	peer := tm.PeerRegistry.GetOrCreate("half.example.")
 	peer.SetState(PeerStateKnown, "test")
 	peer.SetMechanismState("DNS", PeerStateOperational, "test")
-	if _, err := tm.DiscoverPeer(context.Background(), "half.example."); err != nil {
-		t.Fatalf("a peer known on its only mechanism: %v", err)
+	if got, err := tm.DiscoverPeer(context.Background(), "half.example."); err != nil || got != peer || asked != 0 {
+		t.Fatalf("a peer known on its only mechanism: %v %v, resolver asked %d times, want none", got, err, asked)
 	}
 	peer.SetMechanismContactInfo("API", "partial")
 	peer.SetMechanismState("API", PeerStateNeeded, "no TLSA yet")
-	if _, err := tm.DiscoverPeer(context.Background(), "half.example."); err == nil {
+	got, err := tm.DiscoverPeer(context.Background(), "half.example.")
+	if asked == 0 {
 		t.Error("a peer with a mechanism NEEDED was not looked up again")
+	}
+	if err != nil || got != peer {
+		t.Errorf("a known peer whose re-discovery failed: %v %v, want the peer as it was", got, err)
+	}
+	tm.GetImr = nil
+	if got, err := tm.DiscoverPeer(context.Background(), "half.example."); err != nil || got != peer {
+		t.Errorf("a known peer with no resolver to look again: %v %v, want the peer as it was", got, err)
+	}
+	if _, err := tm.DiscoverPeer(context.Background(), "unknown.example."); err == nil {
+		t.Error("an unknown peer with no resolver: no error")
 	}
 }

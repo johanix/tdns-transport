@@ -507,7 +507,10 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 // discovery fails. Returns the resolved Peer on success.
 //
 // If a peer with this identity is already in PeerStateKnown (or
-// higher), DiscoverPeer returns it immediately without re-discovery.
+// higher), DiscoverPeer returns it immediately without re-discovery,
+// unless one of its mechanisms still needs discovery (an API endpoint
+// without a usable TLSA, say); then it looks again, and returns the
+// known peer as it was if that look cannot run or fails.
 // Otherwise the in-package discovery process runs (discovery.go —
 // Phase 2.6; the TEMPORARY DiscoveryDriver seam is gone). When
 // tm.GetImr is nil, DiscoverPeer can only return already-known
@@ -527,13 +530,24 @@ func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (
 	// A peer known on one mechanism is looked up again while another still
 	// needs discovery: an API endpoint whose TLSA was not published yet,
 	// say, or was withdrawn.
-	if peer.EffectiveState() >= PeerStateKnown && !peer.mechanismNeedsDiscovery() {
+	known := peer.EffectiveState() >= PeerStateKnown
+	if known && !peer.mechanismNeedsDiscovery() {
 		return peer, nil
 	}
+	// A mechanism still needed must not hide one that works: a known peer
+	// whose re-discovery cannot run, or fails, is returned as it is.
 	if tm.GetImr == nil {
+		if known {
+			return peer, nil
+		}
 		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no IMR accessor configured", identity)
 	}
 	if err := tm.DiscoverAndRegisterPeer(ctx, identity); err != nil {
+		if known {
+			lgTransport().Debug("re-discovery for a needed mechanism failed; the peer stays as it was",
+				"peer", identity, "err", err)
+			return peer, nil
+		}
 		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
 	}
 	if peer.EffectiveState() < PeerStateKnown {
