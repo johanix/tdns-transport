@@ -573,3 +573,64 @@ func TestTLSAOlderAnswerDoesNotUndoANewerWithdrawal(t *testing.T) {
 		t.Errorf("the older lookup returned %+v %v, want the newer, empty set", r.set, r.err)
 	}
 }
+
+// A set discovery stored while a checker lookup was in flight is not undone
+// by that older lookup's answer.
+func TestTLSACheckerAnswerDoesNotUndoANewerDiscovery(t *testing.T) {
+	old, now := otherCert(t), otherCert(t)
+	src := &stepTLSA{calls: make(chan chan fakeAnswer)}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	peer := withTLSA(tm.PeerRegistry.GetOrCreate("b.example."), old)
+	owner := peer.MechanismTLSA("API").Owner
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.Refresh(context.Background(), peer, "API")
+		close(done)
+	}()
+	inFlight := <-src.calls
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity: "b.example.", APIUri: "https://api.b.example.:443/api/v1", APIAddresses: []string{"192.0.2.1"},
+		TLSA: TLSASet{Owner: owner, Records: []*dns.TLSA{tlsaFor(now)}, Validated: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight <- fakeAnswer{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(old)}, Validated: true}}
+	<-done
+	if !tlsaMatches(peer.MechanismTLSA("API").Records, now) || tlsaMatches(peer.MechanismTLSA("API").Records, old) {
+		t.Error("the checker's older answer undid the set discovery stored")
+	}
+}
+
+// A checker answer for the old name does not undo a move to a new one, even
+// when its lookup started after discovery's.
+func TestTLSACheckerAnswerDoesNotUndoAMove(t *testing.T) {
+	cert := otherCert(t)
+	src := &stepTLSA{calls: make(chan chan fakeAnswer)}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	peer := withTLSA(tm.PeerRegistry.GetOrCreate("b.example."), cert)
+	moved := "_8443._tcp.api.b.example."
+
+	discovered := nextTLSALookup() // discovery's lookup of the new name starts first
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.Refresh(context.Background(), peer, "API")
+		close(done)
+	}()
+	inFlight := <-src.calls
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity: "b.example.", APIUri: "https://api.b.example.:8443/api/v1", APIAddresses: []string{"192.0.2.1"},
+		TLSA: TLSASet{Owner: moved, Validated: true}, tlsaSeq: discovered,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inFlight <- fakeAnswer{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(cert)}, Validated: true}}
+	<-done
+	if got := peer.MechanismTLSA("API"); got.Owner != moved || len(got.Records) != 0 {
+		t.Errorf("after the move the peer holds %s with %d records, want %s with none", got.Owner, len(got.Records), moved)
+	}
+}

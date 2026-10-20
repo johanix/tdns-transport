@@ -41,6 +41,7 @@ type DiscoveryResult struct {
 	LegacyKeyRR  *dns.KEY         // Legacy KEY record (fallback if no JWK)
 	TLSA         TLSASet          // TLSA RRset for TLS verification (its owner even when empty)
 	TLSAFailed   bool             // the TLSA lookup failed: it says nothing, keep what was known
+	tlsaSeq      uint64           // the TLSA lookup's number (nextTLSALookup); zero: numbered when registered
 	APIAddresses []string         // IP addresses for API service from SVCB
 	DNSAddresses []string         // IP addresses for DNS service from SVCB
 	Port         uint16           // Port from URI record
@@ -79,6 +80,7 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 		// certificate is checked against, at both ends. Without a usable
 		// record the API mechanism is not usable.
 		result.TLSA.Owner = fmt.Sprintf("_%d._tcp.%s", apiPort, dns.Fqdn(apiServiceName))
+		result.tlsaSeq = nextTLSALookup()
 		ans, err := imr.lookupTLSA(ctx, result.TLSA.Owner, false)
 		switch {
 		case err != nil:
@@ -331,12 +333,25 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// resolved address (Fix C); URI-without-address is recorded as
 	// ContactInfo "partial" (the application derives its capability flags
 	// from ContactInfo: "complete"/"partial" ⇒ offered, absent ⇒ not).
-	// The TLSA: a lookup that failed says nothing, so the set already held
-	// stays; an answer, a denial included, replaces it.
+	// The TLSA: an answer, a denial included, replaces the set held. A
+	// lookup that failed says nothing, so the set held stays, unless it is
+	// for another name: the endpoint moved, and the old name's records
+	// vouch for nothing at the new one. Of two answers the later lookup's
+	// is kept (storeMechanismTLSA).
 	tlsaGone := false
-	if result.APIUri != "" && result.TLSA.Owner != "" && !result.TLSAFailed {
-		tlsaGone = peer.HasMechanismTLSA("API") && len(result.TLSA.Records) == 0
-		peer.SetMechanismTLSA("API", result.TLSA)
+	if result.APIUri != "" && result.TLSA.Owner != "" {
+		seq := result.tlsaSeq
+		if seq == 0 {
+			seq = nextTLSALookup()
+		}
+		switch {
+		case !result.TLSAFailed:
+			prev, stored := peer.storeMechanismTLSA("API", result.TLSA, seq, false)
+			tlsaGone = stored && len(prev.Records) > 0 && len(result.TLSA.Records) == 0
+		case peer.MechanismTLSA("API").Owner != result.TLSA.Owner:
+			prev, stored := peer.storeMechanismTLSA("API", TLSASet{Owner: result.TLSA.Owner}, seq, false)
+			tlsaGone = stored && len(prev.Records) > 0
+		}
 	}
 	// HTTPS to a peer needs a TLSA to check its certificate against: without
 	// one the API mechanism is not usable, and HTTPS is not attempted.

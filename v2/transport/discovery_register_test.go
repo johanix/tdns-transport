@@ -216,3 +216,40 @@ func TestDiscoverPeerLooksAgainWhileAMechanismIsNeeded(t *testing.T) {
 		t.Error("an unknown peer with no resolver: no error")
 	}
 }
+
+// The endpoint moved to another port and the new name's TLSA could not be
+// looked up: the old name's records vouch for nothing at the new one, so
+// API is not usable and needs discovery again.
+func TestRegisterDiscoveredPeer_aMovedEndpointDropsTheOldTLSA(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	res := &DiscoveryResult{
+		Identity:     "moving.example.",
+		APIUri:       "https://api.moving.example.:443/api/v1",
+		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: "_443._tcp.api.moving.example.", Records: []*dns.TLSA{tlsaFor(otherCert(t))}, Validated: true},
+	}
+	if err := tm.RegisterDiscoveredPeer(res); err != nil {
+		t.Fatal(err)
+	}
+	peer, _ := tm.PeerRegistry.Get("moving.example.")
+	peer.SetMechanismState("API", PeerStateOperational, "test")
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     "moving.example.",
+		APIUri:       "https://api.moving.example.:8443/api/v1",
+		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: "_8443._tcp.api.moving.example."},
+		TLSAFailed:   true,
+		Partial:      true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if peer.APIUsable() {
+		t.Error("API is usable on the old name's TLSA after the endpoint moved")
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded || !peer.mechanismNeedsDiscovery() {
+		t.Errorf("after the move API is %v, want NEEDED and up for discovery", st)
+	}
+	if got := peer.MechanismTLSA("API").Owner; got != "_8443._tcp.api.moving.example." {
+		t.Errorf("the peer's TLSA name is %s, want the new one", got)
+	}
+}

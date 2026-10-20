@@ -414,9 +414,6 @@ func (t *APITransport) ForgetPeer(peer *Peer) {
 	pc := t.clients[peer]
 	delete(t.clients, peer)
 	t.mu.Unlock()
-	if t.TLSA != nil {
-		t.TLSA.Forget(peer)
-	}
 	if pc != nil {
 		pc.client.CloseIdleConnections()
 	}

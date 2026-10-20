@@ -11,6 +11,7 @@ import (
 	"crypto"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -157,6 +158,7 @@ type MechanismState struct {
 type mechanismCrypto struct {
 	KeyRR        *dns.KEY // SIG(0) KEY record (DNS legacy fallback)
 	TLSA         TLSASet  // TLSA RRset (API mTLS verification)
+	tlsaSeq      uint64   // the lookup whose answer TLSA is (nextTLSALookup)
 	JWKData      string   // JWK JSON (DNS payload crypto)
 	KeyAlgorithm string   // JWK algorithm name
 }
@@ -399,12 +401,34 @@ func (p *Peer) ensureMechanismCryptoLocked(name string) *mechanismCrypto {
 }
 
 // SetMechanismTLSA records the TLSA RRset for the named mechanism (replace
-// semantics: the set given is the set held, an empty one included).
+// semantics: the set given is the set held, an empty one included). It
+// counts as the newest answer.
 func (p *Peer) SetMechanismTLSA(name string, set TLSASet) {
+	p.storeMechanismTLSA(name, set, nextTLSALookup(), false)
+}
+
+// tlsaLookups numbers TLSA lookups in the order they start, the checker's
+// and discovery's alike: of two answers for one peer, the later lookup's is
+// kept, whichever is stored last.
+var tlsaLookups atomic.Uint64
+
+func nextTLSALookup() uint64 { return tlsaLookups.Add(1) }
+
+// storeMechanismTLSA stores set, the answer of lookup seq, unless the set
+// held is the answer of a later lookup, or (sameOwner) is for another name:
+// an answer for the old name must not undo a move to a new one. It returns
+// the set held before and whether set was stored.
+func (p *Peer) storeMechanismTLSA(name string, set TLSASet, seq uint64, sameOwner bool) (TLSASet, bool) {
 	set.Records = append([]*dns.TLSA(nil), set.Records...)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.ensureMechanismCryptoLocked(name).TLSA = set
+	c := p.ensureMechanismCryptoLocked(name)
+	prev := c.TLSA
+	if c.tlsaSeq > seq || (sameOwner && prev.Owner != set.Owner) {
+		return prev, false
+	}
+	c.TLSA, c.tlsaSeq = set, seq
+	return prev, true
 }
 
 // SetMechanismJWK records the discovered JWK material for the named

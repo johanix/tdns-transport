@@ -46,7 +46,13 @@ things about that TLSA:
    only records that cannot vouch for an agent. The API mechanism then goes
    back to NEEDED, so discovery looks again. Nothing else empties the set:
    a timeout or a SERVFAIL is a failed check of this request, retryable,
-   and it keeps the set.
+   and it keeps the set. It keeps it only for the same name: when the
+   endpoint moved (another port) and the new name's lookup failed, the old
+   name's records vouch for nothing there, and the set is emptied.
+   Lookups of one peer may overlap, the checker's and discovery's. Each is
+   numbered when it starts, and of two answers the later lookup's is kept,
+   whichever is stored last; a checker's answer for the old name never
+   undoes a move to a new one.
 5. **A mismatch is looked at once more.** When a certificate matches none
    of the records, the resolver may hold a set from before a rotation. The
    check then asks again past the cache, at most once every five minutes
