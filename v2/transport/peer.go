@@ -327,7 +327,7 @@ func timeSinceOrInf(t time.Time) time.Duration {
 // is the single slot the DNS carrier dials (CurrentAddress), while the
 // per-mechanism slot is what HasMechanism and PreferredMechanism read, so
 // a mechanism whose address was discovered but never stored here would
-// look absent.
+// look absent. The HTTPS mechanism dials the API slot (MechanismAddress).
 func (p *Peer) SetMechanismAddress(name string, addr *Address) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,6 +340,17 @@ func (p *Peer) SetMechanismAddress(name string, addr *Address) {
 		p.Mechanisms[name] = m
 	}
 	m.Address = addr
+}
+
+// MechanismAddress is the resolved address of one mechanism ("API",
+// "DNS") as SetMechanismAddress recorded it, or nil.
+func (p *Peer) MechanismAddress(name string) *Address {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if m := p.Mechanisms[name]; m != nil {
+		return m.Address
+	}
+	return nil
 }
 
 // SetMechanismState updates the per-mechanism state. Creates the

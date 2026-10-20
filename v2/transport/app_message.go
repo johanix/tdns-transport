@@ -214,7 +214,7 @@ func (t *APITransport) postMsg(ctx context.Context, peer *Peer, msg *AppMessage)
 	if distributionID == "" {
 		distributionID = GenerateDistributionID()
 	}
-	respBody, err := t.doRequest(ctx, "POST", url, msg.Payload)
+	respBody, err := t.doRequest(ctx, peer, "POST", url, msg.Payload)
 	if err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID, err, true)
 	}
