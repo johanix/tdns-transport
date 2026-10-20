@@ -295,8 +295,9 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 			}
 
 			// DiscoveryAddr is the slot the DNS carrier dials; when both
-			// mechanisms resolve it holds the DNS address (API sends use
-			// APIEndpoint). The per-mechanism slot keeps each address.
+			// mechanisms resolve it holds the DNS address (API sends dial
+			// the API slot, with APIEndpoint's name for TLS). The
+			// per-mechanism slot keeps each address.
 			// API stays the preferred transport when it also resolved,
 			// matching Peer.PreferredMechanism and SelectTransport's default.
 			peer.SetDiscoveryAddress(addr)

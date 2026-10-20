@@ -15,9 +15,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,8 +31,24 @@ type APITransport struct {
 	// DefaultTimeout for API calls
 	DefaultTimeout time.Duration
 
-	// HTTPClient is the shared HTTP client (can be configured for TLS)
+	// HTTPClient is the shared HTTP client (can be configured for TLS). It
+	// dials the endpoint's host name. A peer whose API address discovery
+	// found gets a client of its own, made from this one, that dials that
+	// address instead (clientFor).
 	HTTPClient *http.Client
+
+	mu      sync.Mutex
+	clients map[string]*peerClient // by peer ID
+}
+
+// peerClient is a peer's own HTTP client. It dials addr, the API address
+// discovery found for the peer, whatever the endpoint's host name would
+// resolve to. The URL keeps the name, so TLS uses it: SNI and the
+// certificate check. base is the shared transport it was made from.
+type peerClient struct {
+	addr   string
+	base   *http.Transport
+	client *http.Client
 }
 
 // APITransportConfig holds configuration for creating an APITransport.
@@ -70,9 +88,9 @@ func (t *APITransport) Name() string {
 	return "API"
 }
 
-// apiURL returns the full URL for an API operation on a peer.
-// Uses peer.APIEndpoint (the discovered base URI) when available,
-// falling back to constructing from CurrentAddress().
+// apiURL returns the full URL for an API operation on a peer, from
+// peer.APIEndpoint (the discovered or configured base URI). The address
+// dialed for it is the discovered one when there is one (clientFor).
 func apiURL(peer *Peer, path string) (string, error) {
 	endpoint := peer.GetAPIEndpoint()
 	if endpoint == "" {
@@ -160,7 +178,7 @@ func (t *APITransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 		return nil, NewTransportError("API", "Hello", peer.ID, err, false)
 	}
 
-	respBody, err := t.doRequest(ctx, "POST", url, buildHelloPost(req, peer.ID))
+	respBody, err := t.doRequest(ctx, peer, "POST", url, buildHelloPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("API", "Hello", peer.ID, err, true)
 	}
@@ -199,7 +217,7 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		return nil, NewTransportError("API", "Beat", peer.ID, err, false)
 	}
 
-	respBody, err := t.doRequest(ctx, "POST", url, buildBeatPost(req, peer.ID))
+	respBody, err := t.doRequest(ctx, peer, "POST", url, buildBeatPost(req, peer.ID))
 	if err != nil {
 		return nil, NewTransportError("API", "Beat", peer.ID, err, true)
 	}
@@ -233,7 +251,7 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	}
 
 	sendTime := time.Now()
-	respBody, err := t.doRequest(ctx, "POST", url, buildPingPost(req, peer.ID))
+	respBody, err := t.doRequest(ctx, peer, "POST", url, buildPingPost(req, peer.ID))
 	rtt := time.Since(sendTime)
 	if err != nil {
 		return nil, NewTransportError("API", "Ping", peer.ID, err, true)
@@ -294,8 +312,61 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	return nil
 }
 
-// doRequest performs an HTTP request and returns the response body.
-func (t *APITransport) doRequest(ctx context.Context, method, url string, body interface{}) ([]byte, error) {
+// clientFor is the client a request to peer goes through. A peer with a
+// discovered API address gets its own, which dials that address: discovery
+// found it, and validated it, with the node's own resolver, and the host
+// need not have a system resolver at all. When the address changes, the
+// old client's idle connections are closed, so none of them carries a
+// request to the old address.
+//
+// A peer without one (an endpoint from configuration, say) goes through
+// HTTPClient, which resolves the name. So does every peer when HTTPClient
+// sends through a proxy or dials TLS itself: then the address to dial is
+// not the peer's.
+func (t *APITransport) clientFor(peer *Peer) *http.Client {
+	addr := peer.MechanismAddress("API")
+	base, ok := t.HTTPClient.Transport.(*http.Transport)
+	if addr == nil || !ok || base.Proxy != nil || base.DialTLSContext != nil || base.DialTLS != nil {
+		return t.HTTPClient
+	}
+	hostport := addr.HostPort()
+
+	t.mu.Lock()
+	pc := t.clients[peer.ID]
+	if pc != nil && pc.addr == hostport && pc.base == base && pc.client.Timeout == t.HTTPClient.Timeout {
+		t.mu.Unlock()
+		return pc.client
+	}
+	tr := base.Clone()
+	dial := base.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dial(ctx, network, hostport)
+	}
+	if tr.IdleConnTimeout == 0 {
+		tr.IdleConnTimeout = 90 * time.Second
+	}
+	client := &http.Client{
+		Timeout:       t.HTTPClient.Timeout,
+		CheckRedirect: t.HTTPClient.CheckRedirect,
+		Transport:     tr,
+	}
+	if t.clients == nil {
+		t.clients = make(map[string]*peerClient)
+	}
+	t.clients[peer.ID] = &peerClient{addr: hostport, base: base, client: client}
+	t.mu.Unlock()
+
+	if pc != nil {
+		pc.client.CloseIdleConnections()
+	}
+	return client
+}
+
+// doRequest performs an HTTP request to peer and returns the response body.
+func (t *APITransport) doRequest(ctx context.Context, peer *Peer, method, url string, body interface{}) ([]byte, error) {
 	var reqBody io.Reader
 	switch b := body.(type) {
 	case nil:
@@ -317,7 +388,7 @@ func (t *APITransport) doRequest(ctx context.Context, method, url string, body i
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := t.HTTPClient.Do(req)
+	resp, err := t.clientFor(peer).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
