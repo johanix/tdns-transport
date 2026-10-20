@@ -46,20 +46,26 @@ things about that TLSA:
    only records that cannot vouch for an agent. The API mechanism then goes
    back to NEEDED, so discovery looks again. Nothing else empties the set:
    a timeout or a SERVFAIL is a failed check of this request, retryable,
-   and it keeps the set. It keeps it only for the same name: when the
-   endpoint moved (another port) and the new name's lookup failed, the old
-   name's records vouch for nothing there, and the set is emptied.
-   Lookups of one peer may overlap, the checker's and discovery's. Each is
-   numbered when it starts. For one name, the later lookup's answer is
-   kept, whichever is stored last. Discovery's answer for another name is a
-   move and always wins, as the endpoint it moved with does; a checker's
-   answer for another name is never stored. API counts as usable only when
-   the set held is for the name discovery found.
+   and it keeps the set (see the invariant below for a moved endpoint).
 5. **A mismatch is looked at once more.** When a certificate matches none
    of the records, the resolver may hold a set from before a rotation. The
    check then asks again past the cache, at most once every five minutes
    for that name, and matches against what comes back. A look that fails
    does not count.
+
+## The invariant: who holds a peer's TLSA set
+
+Two writers store a peer's TLSA set, and their lookups may overlap:
+discovery, which also sets the API endpoint, and the check, which only
+refreshes the set it holds. The set held is always for the name of
+discovery's last registration, as the endpoint is: a registration for
+another name replaces it (with an empty set when that lookup failed), and an
+answer for any name but the one held is dropped. For that name, the answer
+of the lookup that started last wins, whichever is stored last, and a failed
+lookup changes nothing. API counts as usable only when the set held is for
+that name and has a usable record. `TestTLSASetInvariantHoldsInEveryInterleaving`
+runs every interleaving of two discoveries (the old name and a new one) and
+two checks, each answering found, withdrawn or failed, against it.
 
 ## The sending end
 
