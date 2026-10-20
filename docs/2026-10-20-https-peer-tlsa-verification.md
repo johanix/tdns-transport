@@ -119,7 +119,13 @@ set is already empty is refused at once, whatever verdict is held.
 ## What a failed check never does
 
 A failed check never leads to an HTTPS send. The fallback is the DNS
-mechanism, whose payloads are signed and encrypted (JOSE) end to end.
+mechanism. Its payloads are signed and encrypted end to end (JOSE) only
+when payload crypto is configured, as it is for an agent with a long-term
+JOSE key. Without it, DNS carries them in plaintext. A missing or withdrawn
+TLSA then moves traffic that HTTPS would have protected onto plaintext DNS.
+That was already possible before this change, but the check adds ways to
+get there. Whether an agent that offers API may run DNS without payload
+crypto is a deployment question this note does not settle.
 
 ## Out of scope
 
