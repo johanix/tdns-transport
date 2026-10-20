@@ -127,6 +127,7 @@ func TestSendDNSOnlyVerbHasNoAPIFallback(t *testing.T) {
 	}
 	peer := NewPeer("peer.example.")
 	peer.APIEndpoint = fmt.Sprintf("https://127.0.0.1:%d", port)
+	withTLSA(peer, otherCert(t)) // nothing is ever presented to check it against
 	addr := &Address{Host: "127.0.0.1", Port: uint16(port), Transport: "tcp"}
 	peer.SetDiscoveryAddress(addr)
 	peer.SetMechanismAddress("DNS", addr)

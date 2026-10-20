@@ -255,40 +255,66 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 	return "", "", 0, fmt.Errorf("no valid DNS URI record found at %s", dnsQname)
 }
 
-// lookupAgentTLSA looks up the TLSA record for an agent's HTTPS service.
-// Queries: _<port>._tcp.<identity> TLSA
-func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TLSA, error) {
-	identity = dns.Fqdn(identity)
+// tlsaAnswer is what the resolver said about a TLSA name: the usable
+// records there, or that the name or the type does not exist, and whether
+// the answer was DNSSEC-validated.
+type tlsaAnswer struct {
+	Records   []*dns.TLSA // usable records only (usableTLSA)
+	Denied    bool        // NXDOMAIN or NODATA: there is no TLSA at the name
+	Validated bool
+}
 
-	tlsaQname := fmt.Sprintf("_%d._tcp.%s", port, identity)
-	lgTransport().Debug("looking up TLSA", "qname", tlsaQname)
+// requireValidation reports whether the resolver is set to require DNSSEC
+// validation (require-dnssec-validation).
+func (imr *Imr) requireValidation() bool {
+	return imr != nil && imr.Imr != nil && imr.RequireDnssecValidation
+}
 
-	resp, err := imr.ImrQuery(ctx, tlsaQname, dns.TypeTLSA, dns.ClassINET, nil)
+// usableTLSA reports whether a TLSA record can vouch for an agent's
+// self-signed certificate: DANE-EE (usage 3), over the full certificate or
+// its SubjectPublicKeyInfo (selector 0 or 1), as a SHA-256 or SHA-512 digest
+// (matching type 1 or 2). That is what VerifyCertAgainstTlsaRR checks; an
+// agent publishes 3 1 1.
+func usableTLSA(rr *dns.TLSA) bool {
+	return rr != nil && rr.Usage == 3 && rr.Selector <= 1 && (rr.MatchingType == 1 || rr.MatchingType == 2)
+}
+
+// lookupTLSA asks the resolver for the TLSA RRset at owner, through its
+// cache, which answers within the TTL; fresh asks past the cached answer.
+// An error is a failed lookup (a timeout, a SERVFAIL): it says nothing about
+// the set. A denial is an answer.
+func (imr *Imr) lookupTLSA(ctx context.Context, owner string, fresh bool) (tlsaAnswer, error) {
+	owner = dns.Fqdn(owner)
+	var resp *tdns.ImrResponse
+	var err error
+	if fresh {
+		resp, err = imr.ImrQueryFresh(ctx, owner, dns.TypeTLSA, dns.ClassINET)
+	} else {
+		resp, err = imr.ImrQuery(ctx, owner, dns.TypeTLSA, dns.ClassINET, nil)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("TLSA query failed for %s: %w", tlsaQname, err)
+		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s failed: %w", owner, err)
 	}
-
+	if resp == nil {
+		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s: no response", owner)
+	}
+	// Denial is NXDOMAIN or NODATA, and zero for an answer.
+	if resp.Denial != 0 {
+		return tlsaAnswer{Denied: true, Validated: resp.Validated}, nil
+	}
 	if resp.Error {
-		return nil, fmt.Errorf("TLSA query error for %s: %s", tlsaQname, resp.ErrorMsg)
+		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s failed: %s", owner, resp.ErrorMsg)
 	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return nil, fmt.Errorf("no TLSA record found at %s", tlsaQname)
-	}
-	if err := imr.requireValidated(resp, "TLSA", tlsaQname); err != nil {
-		return nil, err
-	}
-
-	for _, rr := range resp.RRset.RRs {
-		if tlsaRR, ok := rr.(*dns.TLSA); ok {
-			lgTransport().Debug("found TLSA record", "qname", tlsaQname,
-				"usage", tlsaRR.Usage, "selector", tlsaRR.Selector,
-				"matchingType", tlsaRR.MatchingType, "validated", resp.Validated)
-			return tlsaRR, nil
+	ans := tlsaAnswer{Validated: resp.Validated}
+	if resp.RRset != nil {
+		for _, rr := range resp.RRset.RRs {
+			if t, ok := rr.(*dns.TLSA); ok && usableTLSA(t) {
+				ans.Records = append(ans.Records, t)
+			}
 		}
 	}
-
-	return nil, fmt.Errorf("no valid TLSA record found at %s", tlsaQname)
+	lgTransport().Debug("TLSA lookup", "owner", owner, "fresh", fresh, "records", len(ans.Records), "validated", ans.Validated)
+	return ans, nil
 }
 
 // lookupServiceAddresses looks up SVCB record for a service name.

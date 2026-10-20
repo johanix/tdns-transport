@@ -1,9 +1,12 @@
 package transport
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // RegisterDiscoveredPeer with an API-only result (no DNS URI, no
@@ -15,6 +18,7 @@ func TestRegisterDiscoveredPeer_apiOnlyNeedsNoDNSKey(t *testing.T) {
 		Identity:     "api.example.",
 		APIUri:       "https://api.example.:8443/api/v1",
 		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: "_8443._tcp.api.api.example.", Records: []*dns.TLSA{tlsaFor(otherCert(t))}, Validated: true},
 	})
 	if err != nil {
 		t.Fatalf("RegisterDiscoveredPeer: %v", err)
@@ -116,5 +120,70 @@ func TestTwoDiscoveriesOfOnePeerDoNotRaceItsTraffic(t *testing.T) {
 	}
 	if peer.GetLastBeatReceived().IsZero() {
 		t.Error("no beat received time recorded")
+	}
+}
+
+// An API endpoint without a usable TLSA is not usable: its mechanism stays
+// NEEDED, so the retrier looks again, and a later discovery that finds one
+// makes it KNOWN. A discovery whose TLSA lookup failed keeps the set held.
+func TestRegisterDiscoveredPeer_apiWithoutTLSAIsNotUsable(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	owner := "_8443._tcp.api.late.example."
+	res := &DiscoveryResult{
+		Identity:     "late.example.",
+		APIUri:       "https://api.late.example.:8443/api/v1",
+		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: owner, Validated: true},
+		Partial:      true,
+	}
+	if err := tm.RegisterDiscoveredPeer(res); err != nil {
+		t.Fatalf("RegisterDiscoveredPeer: %v", err)
+	}
+	peer, _ := tm.PeerRegistry.Get("late.example.")
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded || peer.APIUsable() {
+		t.Fatalf("API with no TLSA: state %v, usable %v; want NEEDED and not usable", st, peer.APIUsable())
+	}
+	if !peer.mechanismNeedsDiscovery() {
+		t.Error("a peer with API NEEDED does not need discovery")
+	}
+
+	res.TLSA.Records = []*dns.TLSA{tlsaFor(otherCert(t))}
+	res.Partial = false
+	if err := tm.RegisterDiscoveredPeer(res); err != nil {
+		t.Fatalf("RegisterDiscoveredPeer: %v", err)
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateKnown || !peer.APIUsable() {
+		t.Fatalf("API with a TLSA published: state %v, usable %v; want KNOWN and usable", st, peer.APIUsable())
+	}
+
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     "late.example.",
+		APIUri:       "https://api.late.example.:8443/api/v1",
+		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: owner},
+		TLSAFailed:   true,
+		Partial:      true,
+	}); err != nil {
+		t.Fatalf("RegisterDiscoveredPeer: %v", err)
+	}
+	if !peer.APIUsable() {
+		t.Error("a failed TLSA lookup on re-discovery dropped the set held")
+	}
+}
+
+// A peer known on one mechanism is looked up again while another still
+// needs discovery. Without a resolver the look fails, which shows it ran.
+func TestDiscoverPeerLooksAgainWhileAMechanismIsNeeded(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	peer := tm.PeerRegistry.GetOrCreate("half.example.")
+	peer.SetState(PeerStateKnown, "test")
+	peer.SetMechanismState("DNS", PeerStateOperational, "test")
+	if _, err := tm.DiscoverPeer(context.Background(), "half.example."); err != nil {
+		t.Fatalf("a peer known on its only mechanism: %v", err)
+	}
+	peer.SetMechanismContactInfo("API", "partial")
+	peer.SetMechanismState("API", PeerStateNeeded, "no TLSA yet")
+	if _, err := tm.DiscoverPeer(context.Background(), "half.example."); err == nil {
+		t.Error("a peer with a mechanism NEEDED was not looked up again")
 	}
 }

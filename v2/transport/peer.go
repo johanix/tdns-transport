@@ -81,7 +81,6 @@ type Peer struct {
 	// Cryptographic identity
 	LongTermPubKey crypto.PublicKey // Peer's long-term public key
 	KeyType        string           // Algorithm of the key
-	TLSARecord     []byte           // TLSA record for TLS verification
 
 	// Capabilities
 	Capabilities []string // What the peer supports
@@ -156,10 +155,21 @@ type MechanismState struct {
 // pointers are treated as immutable once set (discovery replaces, never
 // mutates in place).
 type mechanismCrypto struct {
-	KeyRR        *dns.KEY  // SIG(0) KEY record (DNS legacy fallback)
-	TlsaRR       *dns.TLSA // TLSA record (API mTLS verification)
-	JWKData      string    // JWK JSON (DNS payload crypto)
-	KeyAlgorithm string    // JWK algorithm name
+	KeyRR        *dns.KEY // SIG(0) KEY record (DNS legacy fallback)
+	TLSA         TLSASet  // TLSA RRset (API mTLS verification)
+	JWKData      string   // JWK JSON (DNS payload crypto)
+	KeyAlgorithm string   // JWK algorithm name
+}
+
+// TLSASet is a peer's TLSA RRset for one mechanism: the name it lives at,
+// the usable records last seen there (usage 3, DANE-EE; usableTLSA), and
+// whether that answer was DNSSEC-validated. A certificate passes when it
+// matches any of the records: during a rollover the old and the new are
+// published together.
+type TLSASet struct {
+	Owner     string      // _<port>._tcp.<host>
+	Records   []*dns.TLSA // empty: none known, or the name says there is none
+	Validated bool
 }
 
 // MessageStats tracks detailed statistics for messages exchanged with a peer.
@@ -388,12 +398,13 @@ func (p *Peer) ensureMechanismCryptoLocked(name string) *mechanismCrypto {
 	return c
 }
 
-// SetMechanismTLSA records the discovered TLSA record for the named
-// mechanism (replace semantics: re-discovery overwrites, including to nil).
-func (p *Peer) SetMechanismTLSA(name string, tlsa *dns.TLSA) {
+// SetMechanismTLSA records the TLSA RRset for the named mechanism (replace
+// semantics: the set given is the set held, an empty one included).
+func (p *Peer) SetMechanismTLSA(name string, set TLSASet) {
+	set.Records = append([]*dns.TLSA(nil), set.Records...)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.ensureMechanismCryptoLocked(name).TlsaRR = tlsa
+	p.ensureMechanismCryptoLocked(name).TLSA = set
 }
 
 // SetMechanismJWK records the discovered JWK material for the named
@@ -416,14 +427,47 @@ func (p *Peer) SetMechanismKeyRR(name string, key *dns.KEY) {
 	p.ensureMechanismCryptoLocked(name).KeyRR = key
 }
 
-// MechanismTLSA returns the mechanism's discovered TLSA record, or nil.
-func (p *Peer) MechanismTLSA(name string) *dns.TLSA {
+// MechanismTLSA returns the mechanism's TLSA RRset, as last seen; the zero
+// TLSASet when none was.
+func (p *Peer) MechanismTLSA(name string) TLSASet {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if c := p.mechanismCrypto[name]; c != nil {
-		return c.TlsaRR
+		set := c.TLSA
+		set.Records = append([]*dns.TLSA(nil), set.Records...)
+		return set
 	}
-	return nil
+	return TLSASet{}
+}
+
+// APIUsable reports whether HTTPS to the peer can be attempted: it has an
+// API endpoint, and a TLSA to check its certificate against.
+func (p *Peer) APIUsable() bool {
+	return p.GetAPIEndpoint() != "" && p.HasMechanismTLSA("API")
+}
+
+// mechanismNeedsDiscovery reports whether one of the peer's mechanisms was
+// found in part and is still NEEDED: an API endpoint without an address or
+// without a usable TLSA, say. A mechanism the peer never offered is NEEDED
+// too, from NewPeer on, and does not count.
+func (p *Peer) mechanismNeedsDiscovery() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, m := range p.Mechanisms {
+		if m != nil && m.ContactInfo == "partial" && m.State <= PeerStateDiscovering {
+			return true
+		}
+	}
+	return false
+}
+
+// HasMechanismTLSA reports whether the mechanism has a usable TLSA record:
+// without one, HTTPS to the peer is not attempted.
+func (p *Peer) HasMechanismTLSA(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	c := p.mechanismCrypto[name]
+	return c != nil && len(c.TLSA.Records) > 0
 }
 
 // MechanismJWK returns the mechanism's discovered JWK data + algorithm
@@ -797,13 +841,6 @@ func (p *Peer) setPreferredTransportIfUnset(name string) {
 	}
 }
 
-// setTLSARecord records the TLSA certificate data (legacy top-level bytes).
-func (p *Peer) setTLSARecord(data []byte) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.TLSARecord = data
-}
-
 // SetLastBeatReceived records the time of an inbound message from the
 // peer that names no mechanism. A message on a known mechanism goes to
 // SetMechanismLastBeatRecv, which stamps this time as well.
@@ -879,6 +916,11 @@ func (p *Peer) isHealthy() bool {
 type PeerRegistry struct {
 	mu    sync.RWMutex
 	peers map[string]*Peer
+
+	// OnRemove, when set, is called with each peer Remove takes out, after
+	// the registry's lock is released (APITransport.ForgetPeer drops the
+	// peer's HTTPS client).
+	OnRemove func(*Peer)
 }
 
 // NewPeerRegistry creates a new PeerRegistry.
@@ -926,8 +968,13 @@ func (r *PeerRegistry) Add(peer *Peer) error {
 // Remove removes a peer from the registry.
 func (r *PeerRegistry) Remove(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	peer := r.peers[id]
 	delete(r.peers, id)
+	onRemove := r.OnRemove
+	r.mu.Unlock()
+	if peer != nil && onRemove != nil {
+		onRemove(peer)
+	}
 }
 
 // All returns all peers in the registry.

@@ -53,9 +53,14 @@ func apiClient(cfg *APITransportConfig, servers ...*httptest.Server) *APITranspo
 	return NewAPITransport(cfg)
 }
 
-func apiPeer(url string) *Peer {
+// apiPeer is b.example. at srv, with a TLSA for srv's certificate, as
+// discovery would have it.
+func apiPeer(srv *httptest.Server) *Peer {
 	p := NewPeer("b.example.")
-	p.APIEndpoint = url + "/api/v1"
+	p.APIEndpoint = srv.URL + "/api/v1"
+	if cert := srv.Certificate(); cert != nil {
+		withTLSA(p, cert)
+	}
 	return p
 }
 
@@ -76,7 +81,7 @@ func TestAPIOwnVerbsPostTheWireStructs(t *testing.T) {
 	defer srv.Close()
 
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 5 * time.Second}, srv)
-	peer := apiPeer(srv.URL)
+	peer := apiPeer(srv)
 	ctx := context.Background()
 
 	hello, err := tr.Hello(ctx, peer, &HelloRequest{SenderID: "a.example.", SharedZones: []string{"z.example.", "ignored.example."}, Timestamp: at})
@@ -122,7 +127,7 @@ func TestAPIRejectionsAndNonce(t *testing.T) {
 	})
 	defer srv.Close()
 	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
-	peer := apiPeer(srv.URL)
+	peer := apiPeer(srv)
 
 	hello, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."})
 	if err != nil || hello.Accepted || hello.RejectReason != "not a participant" {
@@ -144,7 +149,7 @@ func TestAPISendAppPostsThePayloadVerbatim(t *testing.T) {
 	})
 	defer srv.Close()
 	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
-	peer := apiPeer(srv.URL)
+	peer := apiPeer(srv)
 
 	payload := json.RawMessage(`{"MessageType":"rfi","OriginatorID":"a.example.","YourIdentity":"b.example.","Zone":"z.example.","RfiType":"CONFIG"}`)
 	resp, err := tr.SendApp(context.Background(), peer, &AppMessage{Scope: "z.example.", TypeToken: "rfi", Payload: payload})
@@ -190,7 +195,7 @@ func TestAPIRefusesPlainHTTPAndRedirects(t *testing.T) {
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { posted++ }))
 	defer plain.Close()
 	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example."})
-	if _, err := tr.Hello(context.Background(), apiPeer(plain.URL), &HelloRequest{SenderID: "a.example."}); err == nil {
+	if _, err := tr.Hello(context.Background(), apiPeer(plain), &HelloRequest{SenderID: "a.example."}); err == nil {
 		t.Fatal("an http endpoint must be refused")
 	}
 	if posted != 0 {
@@ -205,7 +210,7 @@ func TestAPIRefusesPlainHTTPAndRedirects(t *testing.T) {
 	}))
 	defer redirector.Close()
 	rt := apiClient(&APITransportConfig{LocalID: "a.example."}, redirector, target)
-	if _, err := rt.Hello(context.Background(), apiPeer(redirector.URL), &HelloRequest{SenderID: "a.example."}); err == nil {
+	if _, err := rt.Hello(context.Background(), apiPeer(redirector), &HelloRequest{SenderID: "a.example."}); err == nil {
 		t.Fatal("a redirect must be refused")
 	}
 	if followed != 0 {
@@ -219,11 +224,11 @@ func TestAPIEmptyReplyIsNotAccepted(t *testing.T) {
 	srv := apiReceiver(t, &captured, func(path string, body []byte) interface{} { return map[string]interface{}{} })
 	defer srv.Close()
 	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
-	hello, err := tr.Hello(context.Background(), apiPeer(srv.URL), &HelloRequest{SenderID: "a.example."})
+	hello, err := tr.Hello(context.Background(), apiPeer(srv), &HelloRequest{SenderID: "a.example."})
 	if err != nil || hello.Accepted {
 		t.Fatalf("empty reply accepted: %+v %v", hello, err)
 	}
-	beat, err := tr.Beat(context.Background(), apiPeer(srv.URL), &BeatRequest{SenderID: "a.example."})
+	beat, err := tr.Beat(context.Background(), apiPeer(srv), &BeatRequest{SenderID: "a.example."})
 	if err != nil || beat.Ack {
 		t.Fatalf("empty reply acked a beat: %+v %v", beat, err)
 	}
@@ -244,7 +249,7 @@ func TestAPIBeatAnswerCarriesGossip(t *testing.T) {
 	})
 	defer srv.Close()
 	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
-	peer := apiPeer(srv.URL)
+	peer := apiPeer(srv)
 
 	beat, err := tr.Beat(context.Background(), peer, &BeatRequest{SenderID: "a.example."})
 	if err != nil || !beat.Ack {
