@@ -196,6 +196,13 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
 			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken), true)
 	}
+	return t.postMsg(ctx, peer, msg)
+}
+
+// postMsg posts msg's payload to the peer's /msg and reads the receiver's
+// reply object as an AppResponse. It carries the sync family (SendApp) and
+// confirmations (Confirm).
+func (t *APITransport) postMsg(ctx context.Context, peer *Peer, msg *AppMessage) (*AppResponse, error) {
 	url, err := apiURL(peer, "/msg")
 	if err != nil {
 		return nil, NewTransportError("API", msg.TypeToken, peer.ID, err, false)

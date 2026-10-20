@@ -458,20 +458,11 @@ func extractPingConfirmFromResponse(res *dns.Msg, peerID string, sw *SecurePaylo
 	return nil, fmt.Errorf("no CHUNK option in response")
 }
 
-// Confirm sends an acknowledgment of a sync operation via DNS.
-// Uses NOTIFY(CHUNK) with status in EDNS0 option.
-func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
-	addr := peer.CurrentAddress()
-	if addr == nil {
-		return NewTransportError("DNS", "Confirm", peer.ID, fmt.Errorf("no address available"), false)
-	}
-
-	// Use the distribution ID from the original request
-	qname := t.buildNotifyQNAME(req.DistributionID)
-
-	// Create confirmation payload with per-RR detail
-	payload := &DnsConfirmPayload{
-		Type:           "confirm",
+// buildConfirmPayload is the confirmation with its per-RR detail, as both
+// mechanisms carry it: in a NOTIFY(CHUNK) and in a POST to /msg.
+func buildConfirmPayload(req *ConfirmRequest) *DnsConfirmPayload {
+	return &DnsConfirmPayload{
+		Type:           VerbConfirm,
 		SenderID:       req.SenderID,
 		Zone:           req.Zone,
 		DistributionID: req.DistributionID,
@@ -489,8 +480,20 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		Truncated:      req.Truncated,
 		Timestamp:      req.Timestamp.Unix(),
 	}
+}
 
-	payloadJSON, err := json.Marshal(payload)
+// Confirm sends an acknowledgment of a sync operation via DNS.
+// Uses NOTIFY(CHUNK) with status in EDNS0 option.
+func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return NewTransportError("DNS", "Confirm", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	// Use the distribution ID from the original request
+	qname := t.buildNotifyQNAME(req.DistributionID)
+
+	payloadJSON, err := json.Marshal(buildConfirmPayload(req))
 	if err != nil {
 		return NewTransportError("DNS", "Confirm", peer.ID,
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
