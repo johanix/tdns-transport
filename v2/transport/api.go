@@ -79,6 +79,10 @@ func NewAPITransport(cfg *APITransportConfig) *APITransport {
 		tlsConfig = &tls.Config{}
 	}
 
+	if cfg.GetImr == nil {
+		lgTransport().Warn("the HTTPS client has no resolver for TLSA lookups; it checks peers against the TLSA discovery stored, which is not looked up again within its TTL")
+	}
+
 	return &APITransport{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: timeout,
@@ -368,6 +372,12 @@ func (t *APITransport) clientFor(peer *Peer) (*http.Client, error) {
 	}
 	prev := tr.TLSClientConfig.VerifyConnection
 	checker := t.TLSA
+	// The handshake has no context of its own; its lookups get the
+	// request's time limit (the cached one is instant after doRequest's).
+	budget := t.HTTPClient.Timeout
+	if budget <= 0 {
+		budget = 2 * checker.lookupTimeout()
+	}
 	tr.TLSClientConfig.VerifyConnection = func(cs tls.ConnectionState) error {
 		if prev != nil {
 			if err := prev(cs); err != nil {
@@ -377,14 +387,16 @@ func (t *APITransport) clientFor(peer *Peer) (*http.Client, error) {
 		if len(cs.PeerCertificates) == 0 {
 			return fmt.Errorf("%w: %s presented no certificate", ErrTLSAMismatch, peer.ID)
 		}
-		return checker.Check(context.Background(), peer, "API", cs.PeerCertificates[0])
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		return checker.Check(ctx, peer, "API", cs.PeerCertificates[0])
 	}
 	if tr.IdleConnTimeout == 0 {
 		tr.IdleConnTimeout = 90 * time.Second
 	}
 	client := &http.Client{
 		Timeout:       t.HTTPClient.Timeout,
-		CheckRedirect: t.HTTPClient.CheckRedirect,
+		CheckRedirect: refuseRedirect, // whatever the shared client says
 		Transport:     tr,
 	}
 	if t.clients == nil {
@@ -434,11 +446,19 @@ func (t *APITransport) doRequest(ctx context.Context, peer *Peer, method, url st
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	// A peer with no TLSA to check its certificate against is not dialed.
-	if !peer.HasMechanismTLSA("API") {
-		owner := peer.MechanismTLSA("API").Owner
-		t.TLSA.NoteNoTLSA(peer, owner)
-		return nil, fmt.Errorf("%w: %s (%s)", ErrNoTLSA, peer.ID, ownerOrUnknown(owner))
+	// The TLSA set as the resolver has it now: a kept-alive connection does
+	// no handshake, so the check there is this one. A peer with no TLSA to
+	// check its certificate against is not dialed.
+	if t.TLSA == nil {
+		return nil, fmt.Errorf("%w: %s: the HTTPS client has no TLSA checker", ErrNoTLSA, peer.ID)
+	}
+	set, err := t.TLSA.Refresh(ctx, peer, "API")
+	if err != nil {
+		return nil, err
+	}
+	if len(set.Records) == 0 {
+		t.TLSA.NoteNoTLSA(peer, set.Owner)
+		return nil, fmt.Errorf("%w: %s (%s)", ErrNoTLSA, peer.ID, ownerOrUnknown(set.Owner))
 	}
 	client, err := t.clientFor(peer)
 	if err != nil {

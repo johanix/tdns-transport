@@ -333,7 +333,9 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// from ContactInfo: "complete"/"partial" ⇒ offered, absent ⇒ not).
 	// The TLSA: a lookup that failed says nothing, so the set already held
 	// stays; an answer, a denial included, replaces it.
+	tlsaGone := false
 	if result.APIUri != "" && result.TLSA.Owner != "" && !result.TLSAFailed {
+		tlsaGone = peer.HasMechanismTLSA("API") && len(result.TLSA.Records) == 0
 		peer.SetMechanismTLSA("API", result.TLSA)
 	}
 	// HTTPS to a peer needs a TLSA to check its certificate against: without
@@ -354,13 +356,23 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		// mechanism NEEDED so the retrier revisits it; do not advertise an
 		// unusable URL; never regress an already-established peer.
 		peer.SetMechanismContactInfo("API", "partial")
-		raw, _ := peer.MechanismRawState("API")
-		why := "no resolved address"
-		if len(result.APIAddresses) > 0 {
-			why = "no usable TLSA at " + result.TLSA.Owner
+		if tlsaGone {
+			// The TLSA it was used with is gone: the mechanism needs
+			// discovery again, which finds a TLSA when one is published.
+			peer.SetMechanismState("API", PeerStateNeeded, "TLSA withdrawn")
 		}
-		lgTransport().Warn("API endpoint URI found but not usable; not marking usable",
-			"identity", result.Identity, "uri", result.APIUri, "why", why, "state", raw.String())
+		raw, _ := peer.MechanismRawState("API")
+		if len(result.APIAddresses) > 0 && tm.APITransport != nil && tm.APITransport.TLSA != nil {
+			// The retrier comes back every interval: at Warn hourly.
+			tm.APITransport.TLSA.NoteNoTLSA(peer, result.TLSA.Owner)
+		} else {
+			why := "no resolved address"
+			if len(result.APIAddresses) > 0 {
+				why = "no usable TLSA at " + result.TLSA.Owner
+			}
+			lgTransport().Warn("API endpoint URI found but not usable; not marking usable",
+				"identity", result.Identity, "uri", result.APIUri, "why", why, "state", raw.String())
+		}
 	}
 
 	if dnsUsable {

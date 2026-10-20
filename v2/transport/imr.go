@@ -295,15 +295,28 @@ func (imr *Imr) lookupTLSA(ctx context.Context, owner string, fresh bool) (tlsaA
 	if err != nil {
 		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s failed: %w", owner, err)
 	}
+	ans, err := tlsaAnswerFrom(owner, resp)
+	if err != nil {
+		return tlsaAnswer{}, err
+	}
+	lgTransport().Debug("TLSA lookup", "owner", owner, "fresh", fresh, "records", len(ans.Records), "validated", ans.Validated)
+	return ans, nil
+}
+
+// tlsaAnswerFrom reads the resolver's response for the TLSA name owner. A
+// failure is checked first, so it is never read as a withdrawal. A denial
+// (NXDOMAIN or NODATA) is an answer; Validated is then the verdict on its
+// proof.
+func tlsaAnswerFrom(owner string, resp *tdns.ImrResponse) (tlsaAnswer, error) {
 	if resp == nil {
 		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s: no response", owner)
+	}
+	if resp.Error {
+		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s failed: %s", owner, resp.ErrorMsg)
 	}
 	// Denial is NXDOMAIN or NODATA, and zero for an answer.
 	if resp.Denial != 0 {
 		return tlsaAnswer{Denied: true, Validated: resp.Validated}, nil
-	}
-	if resp.Error {
-		return tlsaAnswer{}, fmt.Errorf("TLSA query for %s failed: %s", owner, resp.ErrorMsg)
 	}
 	ans := tlsaAnswer{Validated: resp.Validated}
 	if resp.RRset != nil {
@@ -313,7 +326,6 @@ func (imr *Imr) lookupTLSA(ctx context.Context, owner string, fresh bool) (tlsaA
 			}
 		}
 	}
-	lgTransport().Debug("TLSA lookup", "owner", owner, "fresh", fresh, "records", len(ans.Records), "validated", ans.Validated)
 	return ans, nil
 }
 

@@ -169,6 +169,22 @@ func TestRegisterDiscoveredPeer_apiWithoutTLSAIsNotUsable(t *testing.T) {
 	if !peer.APIUsable() {
 		t.Error("a failed TLSA lookup on re-discovery dropped the set held")
 	}
+
+	// A re-discovery that finds the TLSA gone puts an established
+	// mechanism back to NEEDED, so the retrier looks again.
+	peer.SetMechanismState("API", PeerStateOperational, "test")
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     "late.example.",
+		APIUri:       "https://api.late.example.:8443/api/v1",
+		APIAddresses: []string{"192.0.2.1"},
+		TLSA:         TLSASet{Owner: owner, Validated: true},
+		Partial:      true,
+	}); err != nil {
+		t.Fatalf("RegisterDiscoveredPeer: %v", err)
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded || peer.APIUsable() || !peer.mechanismNeedsDiscovery() {
+		t.Errorf("after the TLSA went: state %v, usable %v; want NEEDED, not usable, up for discovery", st, peer.APIUsable())
+	}
 }
 
 // A peer known on one mechanism is looked up again while another still

@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +104,12 @@ func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, c
 		return nil
 	}
 	if set.Owner != "" && c.recheckDue(set.Owner) {
-		if fresh, err := c.current(ctx, peer, mechanism, true); err == nil {
+		fresh, err := c.current(ctx, peer, mechanism, true)
+		if err != nil {
+			// A lookup that failed looked at nothing: the next mismatch
+			// may look again.
+			c.recheckUndo(set.Owner)
+		} else {
 			if tlsaMatches(fresh.Records, cert) {
 				lgTransport().Info("TLSA recheck after a mismatch: the certificate matches the peer's current TLSA",
 					"peer", peer.ID, "owner", set.Owner)
@@ -114,6 +120,15 @@ func (c *TLSAChecker) Check(ctx context.Context, peer *Peer, mechanism string, c
 	}
 	c.noteMismatch(peer, set, cert)
 	return fmt.Errorf("%w: %s (%s): presented SPKI SHA-256 %s", ErrTLSAMismatch, peer.ID, ownerOrUnknown(set.Owner), spkiSHA256Hex(cert))
+}
+
+// Refresh brings the TLSA set of peer's mechanism up to date through the
+// resolver's cache, and returns it. The HTTPS client calls it before each
+// request: a kept-alive connection does no handshake, so without it the set
+// it was checked against could outlive its TTL. A changed set retires the
+// peer's connections (APITransport.clientFor). The errors are as Check's.
+func (c *TLSAChecker) Refresh(ctx context.Context, peer *Peer, mechanism string) (TLSASet, error) {
+	return c.current(ctx, peer, mechanism, false)
 }
 
 // current is the TLSA set of peer's mechanism as the resolver has it now
@@ -141,15 +156,17 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 				"peer", peer.ID, "owner", set.Owner)
 		})
 	}
-	withdrawn := ans.Denied && len(set.Records) > 0
+	// No usable record is a withdrawal too, whether the name is gone or
+	// holds only records that cannot vouch for an agent.
+	withdrawn := len(ans.Records) == 0 && len(set.Records) > 0
 	set.Records = ans.Records
 	set.Validated = ans.Validated
 	peer.SetMechanismTLSA(mechanism, set)
 	if withdrawn {
 		// Nothing to check a certificate against: the mechanism needs
 		// discovery again, which finds a TLSA when one is published.
-		lgTransport().Warn("the peer's TLSA is withdrawn; HTTPS to it stops until one is published",
-			"peer", peer.ID, "owner", set.Owner)
+		lgTransport().Warn("the peer has no usable TLSA any more; HTTPS to it stops until one is published",
+			"peer", peer.ID, "owner", set.Owner, "denied", ans.Denied)
 		peer.SetMechanismContactInfo(mechanism, "partial")
 		peer.SetMechanismState(mechanism, PeerStateNeeded, "TLSA withdrawn")
 	}
@@ -207,6 +224,13 @@ func (c *TLSAChecker) recheckDue(owner string) bool {
 	}
 	c.rechecked[owner] = now
 	return true
+}
+
+// recheckUndo releases the booking recheckDue made for owner.
+func (c *TLSAChecker) recheckUndo(owner string) {
+	c.mu.Lock()
+	delete(c.rechecked, owner)
+	c.mu.Unlock()
 }
 
 // lookupSource is where the lookups go: the resolver GetImr gives, or nil
@@ -267,9 +291,12 @@ func tlsaDigests(records []*dns.TLSA) string {
 	return strings.Join(parts, ", ")
 }
 
-// tlsaKey is a set's records as one comparable string.
+// tlsaKey is a set's records as one comparable string, in an order of its
+// own: the same RRset in another order is the same set.
 func tlsaKey(records []*dns.TLSA) string {
-	return tlsaDigests(records)
+	parts := strings.Split(tlsaDigests(records), ", ")
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
 }
 
 func ownerOrUnknown(owner string) string {

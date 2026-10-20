@@ -29,23 +29,29 @@ things about that TLSA:
 2. **Fresh, bounded by the TTL.** A TLSA learned once and kept for good lets
    a peer whose certificate changed fall back to DNS for good, and keeps a
    withdrawn or compromised TLSA trusted. The check therefore asks the
-   resolver for the RRset at every handshake. The resolver's cache answers
-   within the TTL, so this costs a lookup only when the TTL has run out.
+   resolver for the RRset at every handshake, and the client asks again
+   before every request, since a kept-alive connection does no handshake.
+   The resolver's cache answers within the TTL, so this costs a lookup only
+   when the TTL has run out.
 3. **Validated.** An answer that DNSSEC has not validated vouches for
    nothing: whoever can answer the peer's identity lookups could answer
    with their own TLSA. Over HTTPS the body is plain JSON, so TLS is all
    that protects it. An unvalidated answer is refused. Only with the
    resolver's `require-dnssec-validation` off (a lab setting) is it
    accepted, with a warning per peer (ruled 2026-10-20). That is the same
-   escape hatch tdns's XoT uses. The guarantee therefore holds only with
-   validated discovery.
-4. **A withdrawal counts.** A validated NXDOMAIN or NODATA for the TLSA name
-   empties the set. Nothing else does: a timeout or a SERVFAIL is a failed
-   check of this connection, retryable, and it keeps the set.
+   escape hatch tdns's XoT uses, and like XoT it then takes a bogus answer
+   too. The guarantee therefore holds only with validated discovery.
+4. **A withdrawal counts.** An answer with no usable record empties the
+   set: a validated NXDOMAIN or NODATA for the TLSA name, or a set holding
+   only records that cannot vouch for an agent. The API mechanism then goes
+   back to NEEDED, so discovery looks again. Nothing else empties the set:
+   a timeout or a SERVFAIL is a failed check of this request, retryable,
+   and it keeps the set.
 5. **A mismatch is looked at once more.** When a certificate matches none
    of the records, the resolver may hold a set from before a rotation. The
-   check then asks again past the cache, at most once per rediscovery
-   interval for that name, and matches against what comes back.
+   check then asks again past the cache, at most once every five minutes
+   for that name, and matches against what comes back. A look that fails
+   does not count.
 
 ## The sending end
 
@@ -58,6 +64,10 @@ things about that TLSA:
 - **The check is always on.** It does not depend on `InsecureSkipVerify`:
   a client that also verifies by CA gets both checks. Turning DANE into
   plain WebPKI by dropping a flag is not possible.
+- **Redirects are refused** on every per-peer client, whatever the shared
+  client was given.
+- **No resolver** (`GetImr` nil) is logged at Warn when the client is made:
+  the check then has only the set discovery stored.
 - **No fall-through to a shared client.** Where the check cannot be
   installed (a `Proxy`, a `DialTLS`, a transport that is not an
   `*http.Transport`), the send is refused with a retryable error.
@@ -79,8 +89,10 @@ things about that TLSA:
 ## The receiving end (tdns-mp)
 
 The TLSA middleware calls the same check, so both ends follow the five
-points above. It runs once per TLS connection: a burst of requests on one
-connection does not mean one resolver lookup each.
+points above. It runs once per TLS connection, and again once the verdict
+is a minute old: a burst of requests on one connection does not mean one
+resolver lookup each, and a kept-alive connection outlives a withdrawal by
+at most a minute past the TTL.
 
 ## What a failed check never does
 
@@ -94,7 +106,7 @@ mechanism, whose payloads are signed and encrypted (JOSE) end to end.
 - Management API clients, and tdns's own DoT, DoH and DoQ clients.
 - Peers configured with an endpoint and no discovery (a combiner's or a
   signer's): they have no TLSA, so HTTPS to them cannot pass. tdns-mp
-  refuses to configure one.
+  ignores such an endpoint, with a warning at load.
 
 ## Tests
 
@@ -104,9 +116,12 @@ mechanism, whose payloads are signed and encrypted (JOSE) end to end.
 - With no TLSA, the transport does not dial, and the error is `ErrNoTLSA`.
 - An unvalidated TLSA is refused, and accepted with a warning when
   validation is not required.
-- A validated denial empties the set. A failed lookup keeps it, and the
-  connection fails retryably.
+- A validated denial empties the set, and so does an answer with no usable
+  record. A failed lookup keeps it, and the request fails retryably.
+- A kept-alive connection: after a withdrawal or a rotation the next
+  request is refused, and the receiver sees no more.
 - After a mismatch, a fresh lookup that finds the new record lets the
   connection through.
-- A client that verifies by CA checks the TLSA too.
+- A client that verifies by CA checks the TLSA too. One with
+  `InsecureSkipVerify`, as agents run, refuses a key the TLSA does not name.
 - Where the check cannot be installed, the send is refused.

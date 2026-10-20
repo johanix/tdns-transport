@@ -6,6 +6,8 @@
  * before any request; the set is looked up at each check, an unvalidated
  * answer refused unless validation is off, a denial empties it, a failed
  * lookup keeps it, and a mismatch is looked at once more past the cache.
+ * The set is looked up again before each request, so a kept-alive
+ * connection sees a withdrawal or a rotation too.
  */
 
 package transport
@@ -16,17 +18,21 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -93,6 +99,13 @@ func (f *fakeTLSA) lookupTLSA(_ context.Context, _ string, fresh bool) (tlsaAnsw
 }
 
 func (f *fakeTLSA) requireValidation() bool { return f.strict }
+
+// set replaces the answers still to come.
+func (f *fakeTLSA) set(answers ...fakeAnswer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers = answers
+}
 
 func (f *fakeTLSA) lookups() []bool {
 	f.mu.Lock()
@@ -265,14 +278,16 @@ func TestTLSAMismatchLooksAgainPastTheCache(t *testing.T) {
 	rotated := tlsaAnswer{Records: []*dns.TLSA{tlsaFor(srv.Certificate())}, Validated: true}
 
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, srv)
-	src := &fakeTLSA{answers: []fakeAnswer{{ans: old}, {ans: rotated}}}
+	// The request's lookup and the handshake's find the cached set; the
+	// look past the cache finds the rotated one.
+	src := &fakeTLSA{answers: []fakeAnswer{{ans: old}, {ans: old}, {ans: rotated}}}
 	tr.TLSA.source = src
 	peer := apiPeer(srv)
 	if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); err != nil {
 		t.Fatalf("the rotated certificate after a look past the cache: %v", err)
 	}
-	if got := src.lookups(); len(got) != 2 || got[0] || !got[1] {
-		t.Errorf("lookups (fresh?) %v, want a cached one and then a fresh one", got)
+	if got := src.lookups(); len(got) != 3 || got[0] || got[1] || !got[2] {
+		t.Errorf("lookups (fresh?) %v, want two cached ones and then a fresh one", got)
 	}
 
 	// The next mismatch within the interval is not looked at again.
@@ -284,7 +299,7 @@ func TestTLSAMismatchLooksAgainPastTheCache(t *testing.T) {
 			t.Fatalf("a certificate the set does not name: %v, want ErrTLSAMismatch", err)
 		}
 	}
-	if got := src2.lookups(); len(got) != 3 || got[0] || !got[1] || got[2] {
+	if got := src2.lookups(); len(got) != 5 || got[0] || got[1] || !got[2] || got[3] || got[4] {
 		t.Errorf("lookups (fresh?) %v, want one fresh look in the interval", got)
 	}
 }
@@ -324,5 +339,145 @@ func TestAPIForgetsARemovedPeer(t *testing.T) {
 	tr.mu.Unlock()
 	if n != 0 {
 		t.Errorf("%d clients after the peer was removed, want none", n)
+	}
+}
+
+// A kept-alive connection does no handshake, so the set is looked up again
+// before each request: after a withdrawal or a rotation the next request is
+// refused, and the receiver sees no more.
+func TestTLSAKeptAliveConnectionSeesAWithdrawalAndARotation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want error
+	}{{"withdrawal", ErrNoTLSA}, {"rotation", ErrTLSAMismatch}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []apiCapture
+			srv := apiReceiver(t, &captured, okReply)
+			defer srv.Close()
+			after := tlsaAnswer{Denied: true, Validated: true}
+			if tc.want == ErrTLSAMismatch {
+				after = tlsaAnswer{Records: []*dns.TLSA{tlsaFor(otherCert(t))}, Validated: true}
+			}
+			src := &fakeTLSA{answers: []fakeAnswer{{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(srv.Certificate())}, Validated: true}}}}
+			tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, srv)
+			tr.TLSA.source = src
+			peer := apiPeer(srv)
+			for i := 0; i < 2; i++ {
+				if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); err != nil {
+					t.Fatalf("hello %d with the TLSA matching: %v", i, err)
+				}
+			}
+			src.set(fakeAnswer{ans: after})
+			if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); !errors.Is(err, tc.want) {
+				t.Fatalf("after the %s: %v, want %v", tc.name, err, tc.want)
+			}
+			if len(captured) != 2 {
+				t.Errorf("the receiver got %d requests, want the 2 before the %s", len(captured), tc.name)
+			}
+		})
+	}
+}
+
+// A validated answer with no usable record (only a 3 1 0, say) leaves
+// nothing to check against: it is a withdrawal, as a denial is.
+func TestTLSANoUsableRecordIsAWithdrawal(t *testing.T) {
+	var captured []apiCapture
+	srv := apiReceiver(t, &captured, okReply)
+	defer srv.Close()
+	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, srv)
+	tr.TLSA.source = &fakeTLSA{answers: []fakeAnswer{{ans: tlsaAnswer{Validated: true}}}}
+	peer := apiPeer(srv)
+	peer.SetMechanismContactInfo("API", "complete")
+	peer.SetMechanismState("API", PeerStateOperational, "test")
+	if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); !errors.Is(err, ErrNoTLSA) {
+		t.Fatalf("no usable record: %v, want ErrNoTLSA", err)
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded || !peer.mechanismNeedsDiscovery() {
+		t.Errorf("the API mechanism is %v, want NEEDED and up for discovery", st)
+	}
+	if len(captured) != 0 {
+		t.Errorf("the receiver got %d requests, want none", len(captured))
+	}
+}
+
+// The resolver's response, read: a failure first (never a withdrawal), a
+// denial with the verdict on its proof, and only the usable records.
+func TestTLSAAnswerFromTheResolversResponse(t *testing.T) {
+	ee := tlsaFor(otherCert(t))
+	exact := &dns.TLSA{Hdr: ee.Hdr, Usage: 3, Selector: 1, MatchingType: 0, Certificate: "00"}
+	anchor := &dns.TLSA{Hdr: ee.Hdr, Usage: 2, Selector: 0, MatchingType: 1, Certificate: ee.Certificate}
+
+	if _, err := tlsaAnswerFrom("x.example.", nil); err == nil {
+		t.Error("no response read as an answer")
+	}
+	if _, err := tlsaAnswerFrom("x.example.", &tdns.ImrResponse{Error: true, ErrorMsg: "SERVFAIL", Denial: 1}); err == nil {
+		t.Error("a failure that also carries a denial read as an answer")
+	}
+	ans, err := tlsaAnswerFrom("x.example.", &tdns.ImrResponse{Denial: 1, Validated: true})
+	if err != nil || !ans.Denied || !ans.Validated || len(ans.Records) != 0 {
+		t.Errorf("a validated denial: %+v %v", ans, err)
+	}
+	ans, err = tlsaAnswerFrom("x.example.", &tdns.ImrResponse{Validated: true, RRset: &core.RRset{RRs: []dns.RR{exact, anchor, ee}}})
+	if err != nil || ans.Denied || !ans.Validated || len(ans.Records) != 1 || ans.Records[0] != ee {
+		t.Errorf("a set of three, one usable: %+v %v", ans, err)
+	}
+	ans, err = tlsaAnswerFrom("x.example.", &tdns.ImrResponse{RRset: &core.RRset{RRs: []dns.RR{exact}}})
+	if err != nil || ans.Denied || ans.Validated || len(ans.Records) != 0 {
+		t.Errorf("an unvalidated set with no usable record: %+v %v", ans, err)
+	}
+}
+
+// The client as agents run it: no CA, InsecureSkipVerify. The TLSA is then
+// the whole check: the key it names passes, any other key is refused.
+func TestTLSAWithoutACAIsTheWholeCheck(t *testing.T) {
+	var captured []apiCapture
+	srv := apiReceiver(t, &captured, okReply)
+	defer srv.Close()
+	tr := NewAPITransport(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second,
+		TLSConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}}) //nolint:gosec
+	if _, err := tr.Hello(context.Background(), apiPeer(srv), &HelloRequest{SenderID: "a.example."}); err != nil {
+		t.Fatalf("the key the TLSA names: %v", err)
+	}
+	impostor := withTLSA(apiPeer(srv), otherCert(t))
+	if _, err := tr.Hello(context.Background(), impostor, &HelloRequest{SenderID: "a.example."}); !errors.Is(err, ErrTLSAMismatch) {
+		t.Fatalf("a key the TLSA does not name: %v, want ErrTLSAMismatch", err)
+	}
+	if len(captured) != 1 {
+		t.Errorf("the receiver got %d requests, want 1", len(captured))
+	}
+}
+
+// A look past the cache that failed looked at nothing: the next mismatch
+// may look again.
+func TestTLSARecheckThatFailedMayRunAgain(t *testing.T) {
+	held := tlsaAnswer{Records: []*dns.TLSA{tlsaFor(otherCert(t))}, Validated: true}
+	src := &fakeTLSA{answers: []fakeAnswer{{ans: held}, {err: errors.New("timeout")}, {ans: held}}}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	peer := withTLSA(NewPeer("b.example."), otherCert(t))
+	presented := otherCert(t)
+	for i := 0; i < 2; i++ {
+		if err := c.Check(context.Background(), peer, "API", presented); !errors.Is(err, ErrTLSAMismatch) {
+			t.Fatalf("check %d: %v, want ErrTLSAMismatch", i, err)
+		}
+	}
+	if got := src.lookups(); len(got) != 4 || got[0] || !got[1] || got[2] || !got[3] {
+		t.Errorf("lookups (fresh?) %v, want a fresh look after each mismatch", got)
+	}
+}
+
+// A peer's client refuses redirects, whatever the shared client was given.
+func TestAPIPeerClientRefusesRedirects(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	tr := apiClient(&APITransportConfig{LocalID: "a.example."}, srv)
+	tr.HTTPClient.CheckRedirect = nil
+	client, err := tr.clientFor(apiPeer(srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://elsewhere.invalid/", nil)
+	if client.CheckRedirect == nil || client.CheckRedirect(req, nil) == nil {
+		t.Error("the peer's client follows redirects")
 	}
 }
