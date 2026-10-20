@@ -135,9 +135,6 @@ func TestAPIRejectionsAndNonce(t *testing.T) {
 	if _, err := tr.Hello(context.Background(), NewPeer("nowhere.example."), &HelloRequest{SenderID: "a.example."}); err == nil {
 		t.Fatal("a peer without an API endpoint must fail")
 	}
-	if err := tr.Confirm(context.Background(), peer, &ConfirmRequest{}); err == nil {
-		t.Fatal("Confirm over HTTPS must fail: there is no receiver")
-	}
 }
 
 func TestAPISendAppPostsThePayloadVerbatim(t *testing.T) {

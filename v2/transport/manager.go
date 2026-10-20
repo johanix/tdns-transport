@@ -298,12 +298,14 @@ func (tm *TransportManager) MarkDeliveryConfirmed(distributionID, senderID strin
 //
 //   - *AppMessage     → Transport.SendApp (all application verbs; C2)
 //   - *PingRequest    → Transport.Ping
+//   - *ConfirmRequest → Transport.Confirm (see Confirm)
 //
 // (Hello and Beat are deliberately NOT supported by this
 // primary-then-fallback path: they are sent on every eligible
 // mechanism, each outcome mattering. Use SendAll for them (D1).)
 //
-// Returns the response (one of *AppResponse, *PingResponse) or an error if both transports failed or the
+// Returns the response (one of *AppResponse, *PingResponse; nil for a
+// confirmation) or an error if both transports failed or the
 // message type is unsupported. A verb only DNS carries has no API fallback.
 // When every transport tried has failed, the error names each mechanism
 // with its error and wraps each one: errors.Is matches any of them, and
@@ -340,6 +342,47 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	return sendWith(ctx, peer, req, primary, fallback)
 }
 
+// Confirm sends a confirmation to peer as Send sends a message: on the
+// transport SelectTransport picks (the API when the peer offers it), then
+// on the other one when that fails. A receiver that does not take
+// confirmations over HTTPS refuses the API's, and the DNS NOTIFY carries
+// it instead. When the other one can reach the peer, the first try gets
+// half of ctx's time.
+//
+// A try that times out after the receiver took the confirmation sends it
+// again on the other mechanism, and the receiver gets it twice, as it
+// does when a sender re-sends a message whose confirmation was lost.
+func (tm *TransportManager) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
+	if req == nil {
+		return fmt.Errorf("Confirm: empty confirmation")
+	}
+	_, err := tm.Send(ctx, peer, req)
+	return err
+}
+
+// reaches reports whether t has somewhere to send to peer: an endpoint
+// for the API, an address for DNS. A transport of another kind (a test's)
+// is taken to reach it.
+func reaches(t Transport, peer *Peer) bool {
+	switch t.(type) {
+	case *APITransport:
+		return peer.GetAPIEndpoint() != ""
+	case *DNSTransport:
+		return peer.CurrentAddress() != nil
+	}
+	return true
+}
+
+// halfOfDeadline is ctx with half the time it has left, or ctx itself
+// when it has no deadline.
+func halfOfDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Until(deadline)/2)
+}
+
 // noTransportReason says, per mechanism, why SelectTransport found no
 // transport for peer.
 func (tm *TransportManager) noTransportReason(peer *Peer) string {
@@ -374,6 +417,21 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
 			}
 			return resp, nil
+		}
+	case *ConfirmRequest:
+		first := fallback != nil && reaches(fallback, peer)
+		dispatch = func(t Transport) (interface{}, error) {
+			// A confirmation is sent once. When the fallback can reach the
+			// peer, the primary gets half the time left, so that a peer
+			// that hangs on it leaves the fallback the other half.
+			actx := ctx
+			if first {
+				first = false
+				var cancel context.CancelFunc
+				actx, cancel = halfOfDeadline(ctx)
+				defer cancel()
+			}
+			return nil, t.Confirm(actx, peer, r)
 		}
 	case *PingRequest:
 		dispatch = func(t Transport) (interface{}, error) {

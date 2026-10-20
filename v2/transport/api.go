@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,8 +114,9 @@ func refuseRedirect(req *http.Request, _ []*http.Request) error {
 // The HTTPS mechanism speaks the same bodies the multi-provider sync API
 // has always accepted (cleanup plan step 5): hello, beat and ping post the
 // transport-own wire structs (wire_own.go, byte-identical to the DNS
-// payloads), an application message posts its payload verbatim to /msg,
-// and every reply is the receiver's {Status, Error, ErrorMsg, ...} object.
+// payloads), an application message posts its payload verbatim to /msg, a
+// confirmation posts the DNS confirm payload to /msg, and every reply is
+// the receiver's {Status, Error, ErrorMsg, ...} object.
 // The snake_case dialect this file spoke before step 5 had no receiver.
 
 // apiReply is the receiver's response object, in every endpoint's shape:
@@ -252,12 +254,44 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	}, nil
 }
 
-// Confirm is not carried by the HTTPS mechanism: a message's confirmation
-// is the synchronous reply to the POST that delivered it. The DNS
-// mechanism sends confirm NOTIFYs; there was never an HTTPS receiver.
+// Confirm posts a confirmation to the peer's /msg. The body is the confirm
+// payload a DNS confirmation carries in its NOTIFY, so the receiver routes
+// it to the same handler. It is a message of its own: the PENDING and the
+// final confirmation of a SYNC come after the reply to the SYNC's POST.
+//
+// Every failure is retryable, so that TransportManager.Confirm sends the
+// confirmation over DNS instead. A receiver from before confirmations went
+// over HTTPS refuses it: its /msg takes only the sync family. Whatever
+// else keeps the API from delivering it (a timeout, an endpoint that is
+// not https, a reply that is not JSON) does not keep DNS from it.
 func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
-	return NewTransportError("API", "Confirm", peer.ID,
-		fmt.Errorf("confirmations are not carried by the HTTPS mechanism"), false)
+	if req == nil {
+		return NewTransportError("API", "Confirm", peer.ID, fmt.Errorf("empty confirmation"), false)
+	}
+	payload, err := json.Marshal(buildConfirmPayload(req))
+	if err != nil {
+		return NewTransportError("API", "Confirm", peer.ID,
+			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
+	}
+	resp, err := t.postMsg(ctx, peer, &AppMessage{
+		Scope:          req.Zone,
+		TypeToken:      VerbConfirm,
+		Payload:        payload,
+		DistributionID: req.DistributionID,
+	})
+	if err != nil {
+		var te *TransportError
+		if errors.As(err, &te) {
+			err = te.Err
+		}
+		return NewTransportError("API", "Confirm", peer.ID, err, true)
+	}
+	if resp.Status != ConfirmSuccess {
+		return NewTransportError("API", "Confirm", peer.ID,
+			fmt.Errorf("recipient refused the confirmation: %s", resp.Message), true)
+	}
+	peer.Stats.recordMessageSent(VerbConfirm)
+	return nil
 }
 
 // doRequest performs an HTTP request and returns the response body.
