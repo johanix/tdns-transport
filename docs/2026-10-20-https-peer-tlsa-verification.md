@@ -50,9 +50,11 @@ things about that TLSA:
    endpoint moved (another port) and the new name's lookup failed, the old
    name's records vouch for nothing there, and the set is emptied.
    Lookups of one peer may overlap, the checker's and discovery's. Each is
-   numbered when it starts, and of two answers the later lookup's is kept,
-   whichever is stored last; a checker's answer for the old name never
-   undoes a move to a new one.
+   numbered when it starts. For one name, the later lookup's answer is
+   kept, whichever is stored last. Discovery's answer for another name is a
+   move and always wins, as the endpoint it moved with does; a checker's
+   answer for another name is never stored. API counts as usable only when
+   the set held is for the name discovery found.
 5. **A mismatch is looked at once more.** When a certificate matches none
    of the records, the resolver may hold a set from before a rotation. The
    check then asks again past the cache, at most once every five minutes

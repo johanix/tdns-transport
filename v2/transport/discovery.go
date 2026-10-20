@@ -355,7 +355,10 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	}
 	// HTTPS to a peer needs a TLSA to check its certificate against: without
 	// one the API mechanism is not usable, and HTTPS is not attempted.
-	apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API")
+	// The set held must be for the name discovery found: one for another
+	// name vouches for nothing at this endpoint.
+	apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
+		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
 		peer.SetMechanismContactInfo("API", "complete")
 		// Guarded promotion: do not regress an already-established mechanism.

@@ -414,17 +414,19 @@ var tlsaLookups atomic.Uint64
 
 func nextTLSALookup() uint64 { return tlsaLookups.Add(1) }
 
-// storeMechanismTLSA stores set, the answer of lookup seq, unless the set
-// held is the answer of a later lookup, or (sameOwner) is for another name:
-// an answer for the old name must not undo a move to a new one. It returns
-// the set held before and whether set was stored.
+// storeMechanismTLSA stores set, the answer of lookup seq. For the name
+// held, the later lookup's answer is kept. A set for another name is a move:
+// discovery's (sameOwner false) wins whatever the numbers, as the endpoint
+// it moved with does; a checker's answer for another name (sameOwner) is
+// never stored. It returns the set held before and whether set was stored.
 func (p *Peer) storeMechanismTLSA(name string, set TLSASet, seq uint64, sameOwner bool) (TLSASet, bool) {
 	set.Records = append([]*dns.TLSA(nil), set.Records...)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c := p.ensureMechanismCryptoLocked(name)
 	prev := c.TLSA
-	if c.tlsaSeq > seq || (sameOwner && prev.Owner != set.Owner) {
+	moved := prev.Owner != set.Owner
+	if (moved && sameOwner) || (!moved && c.tlsaSeq > seq) {
 		return prev, false
 	}
 	c.TLSA, c.tlsaSeq = set, seq

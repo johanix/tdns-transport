@@ -634,3 +634,37 @@ func TestTLSACheckerAnswerDoesNotUndoAMove(t *testing.T) {
 		t.Errorf("after the move the peer holds %s with %d records, want %s with none", got.Owner, len(got.Records), moved)
 	}
 }
+
+// The reverse timing: a checker lookup of the old name starts after
+// discovery's lookup of the new name, and stores first. Discovery's move to
+// the new name still wins when it registers.
+func TestTLSADiscoveryMoveWinsOverAnEarlierStoredCheckerAnswer(t *testing.T) {
+	cert := otherCert(t)
+	src := &stepTLSA{calls: make(chan chan fakeAnswer)}
+	c := NewTLSAChecker(nil)
+	c.source = src
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	peer := withTLSA(tm.PeerRegistry.GetOrCreate("b.example."), cert)
+	moved := "_8443._tcp.api.b.example."
+
+	discovered := nextTLSALookup() // discovery's lookup of the new name starts first
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.Refresh(context.Background(), peer, "API")
+		close(done)
+	}()
+	(<-src.calls) <- fakeAnswer{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(cert)}, Validated: true}}
+	<-done // the checker's answer for the old name is stored, with a later number
+	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity: "b.example.", APIUri: "https://api.b.example.:8443/api/v1", APIAddresses: []string{"192.0.2.1"},
+		TLSA: TLSASet{Owner: moved, Validated: true}, tlsaSeq: discovered,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := peer.MechanismTLSA("API"); got.Owner != moved || len(got.Records) != 0 {
+		t.Errorf("after the move the peer holds %s with %d records, want %s with none", got.Owner, len(got.Records), moved)
+	}
+	if peer.APIUsable() {
+		t.Error("API is usable on the old name's records after the move")
+	}
+}
