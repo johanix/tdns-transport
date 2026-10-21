@@ -7,9 +7,9 @@ replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
 require (
 	github.com/cloudflare/circl v1.6.3
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/johanix/tdns/v2 v2.0.0-20260911111736-d1eec10219b7
-	github.com/johanix/tdns/v2/core v0.0.0-20260911111736-d1eec10219b7
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20260911111736-d1eec10219b7
+	github.com/johanix/tdns/v2 v2.0.0-20261020103408-abe102e3ff8f
+	github.com/johanix/tdns/v2/core v0.0.0-20261020103408-abe102e3ff8f
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261020103408-abe102e3ff8f
 	github.com/miekg/dns v1.1.70
 )
 
@@ -23,11 +23,11 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20260911111736-d1eec10219b7 // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20261020103408-abe102e3ff8f // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.59.1 // indirect

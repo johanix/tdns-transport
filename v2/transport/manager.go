@@ -193,7 +193,14 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		tm.APITransport = NewAPITransport(&APITransportConfig{
 			LocalID:        cfg.LocalID,
 			DefaultTimeout: apiTimeout,
+			GetImr: func() *Imr {
+				if tm.GetImr != nil {
+					return tm.GetImr()
+				}
+				return nil
+			},
 		})
+		tm.PeerRegistry.OnRemove = tm.APITransport.ForgetPeer
 	}
 
 	// Create ChunkNotifyHandler if DNS transport is available
@@ -232,20 +239,20 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 // SelectTransport chooses the best transport for a peer.
 // Respects peer's PreferredTransport, falls back to API then DNS.
 func (tm *TransportManager) SelectTransport(peer *Peer) Transport {
-	apiEndpoint := peer.GetAPIEndpoint()
+	apiUsable := tm.APITransport != nil && peer.APIUsable()
 	switch peer.GetPreferredTransport() {
 	case "DNS":
 		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
 			return tm.DNSTransport
 		}
 	case "API":
-		if tm.APITransport != nil && apiEndpoint != "" {
+		if apiUsable {
 			return tm.APITransport
 		}
 	}
 
 	// Default: API first (more reliable), then DNS
-	if tm.APITransport != nil && apiEndpoint != "" {
+	if apiUsable {
 		return tm.APITransport
 	}
 	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
@@ -360,13 +367,13 @@ func (tm *TransportManager) Confirm(ctx context.Context, peer *Peer, req *Confir
 	return err
 }
 
-// reaches reports whether t has somewhere to send to peer: an endpoint
-// for the API, an address for DNS. A transport of another kind (a test's)
-// is taken to reach it.
+// reaches reports whether t has somewhere to send to peer: an endpoint and
+// a TLSA for the API (APIUsable), an address for DNS. A transport of another
+// kind (a test's) is taken to reach it.
 func reaches(t Transport, peer *Peer) bool {
 	switch t.(type) {
 	case *APITransport:
-		return peer.GetAPIEndpoint() != ""
+		return peer.APIUsable()
 	case *DNSTransport:
 		return peer.CurrentAddress() != nil
 	}
@@ -389,6 +396,8 @@ func (tm *TransportManager) noTransportReason(peer *Peer) string {
 	apiWhy, dnsWhy := "peer has no endpoint", "peer has no address"
 	if tm.APITransport == nil {
 		apiWhy = "not enabled"
+	} else if peer.GetAPIEndpoint() != "" {
+		apiWhy = "peer has no usable TLSA"
 	}
 	if tm.DNSTransport == nil {
 		dnsWhy = "not enabled"
@@ -498,7 +507,10 @@ func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
 // discovery fails. Returns the resolved Peer on success.
 //
 // If a peer with this identity is already in PeerStateKnown (or
-// higher), DiscoverPeer returns it immediately without re-discovery.
+// higher), DiscoverPeer returns it immediately without re-discovery,
+// unless one of its mechanisms still needs discovery (an API endpoint
+// without a usable TLSA, say); then it looks again, and returns the
+// known peer as it was if that look cannot run or fails.
 // Otherwise the in-package discovery process runs (discovery.go —
 // Phase 2.6; the TEMPORARY DiscoveryDriver seam is gone). When
 // tm.GetImr is nil, DiscoverPeer can only return already-known
@@ -515,13 +527,27 @@ func (tm *TransportManager) DiscoverPeer(ctx context.Context, identity string) (
 		return nil, fmt.Errorf("DiscoverPeer: empty identity")
 	}
 	peer := tm.PeerRegistry.GetOrCreate(identity)
-	if peer.EffectiveState() >= PeerStateKnown {
+	// A peer known on one mechanism is looked up again while another still
+	// needs discovery: an API endpoint whose TLSA was not published yet,
+	// say, or was withdrawn.
+	known := peer.EffectiveState() >= PeerStateKnown
+	if known && !peer.mechanismNeedsDiscovery() {
 		return peer, nil
 	}
+	// A mechanism still needed must not hide one that works: a known peer
+	// whose re-discovery cannot run, or fails, is returned as it is.
 	if tm.GetImr == nil {
+		if known {
+			return peer, nil
+		}
 		return nil, fmt.Errorf("DiscoverPeer: peer %q not known and no IMR accessor configured", identity)
 	}
 	if err := tm.DiscoverAndRegisterPeer(ctx, identity); err != nil {
+		if known {
+			lgTransport().Debug("re-discovery for a needed mechanism failed; the peer stays as it was",
+				"peer", identity, "err", err)
+			return peer, nil
+		}
 		return nil, fmt.Errorf("DiscoverPeer: discovery failed for %q: %w", identity, err)
 	}
 	if peer.EffectiveState() < PeerStateKnown {

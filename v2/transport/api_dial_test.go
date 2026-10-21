@@ -33,6 +33,7 @@ import (
 type namedServer struct {
 	srv    *httptest.Server
 	served atomic.Int32
+	opened atomic.Int32
 	closed atomic.Int32
 }
 
@@ -63,7 +64,10 @@ func newNamedServer(t *testing.T, name string) *namedServer {
 	}))
 	ns.srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	ns.srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateClosed {
+		switch state {
+		case http.StateNew:
+			ns.opened.Add(1)
+		case http.StateClosed:
 			ns.closed.Add(1)
 		}
 	}
@@ -79,11 +83,11 @@ func (ns *namedServer) address() *Address {
 
 // discoveredPeer is b.example. as discovery registers it: an endpoint with
 // a host name and the address discovery found for it.
-func discoveredPeer(name string, port uint16, addr *Address) *Peer {
+func discoveredPeer(name string, port uint16, addr *Address, certs ...*x509.Certificate) *Peer {
 	p := NewPeer("b.example.")
 	p.APIEndpoint = "https://" + net.JoinHostPort(name, strconv.Itoa(int(port))) + "/api/v1"
 	p.SetMechanismAddress("API", addr)
-	return p
+	return withTLSA(p, certs...)
 }
 
 // A peer whose endpoint name no resolver answers is reached at the address
@@ -93,7 +97,7 @@ func TestAPIDialsTheDiscoveredAddress(t *testing.T) {
 	const name = "api.b.invalid"
 	ns := newNamedServer(t, name)
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, ns.srv)
-	peer := discoveredPeer(name, ns.address().Port, ns.address())
+	peer := discoveredPeer(name, ns.address().Port, ns.address(), ns.srv.Certificate())
 	ctx := context.Background()
 
 	hello, err := tr.Hello(ctx, peer, &HelloRequest{SenderID: "a.example."})
@@ -113,7 +117,7 @@ func TestAPIDialsTheDiscoveredAddress(t *testing.T) {
 func TestAPIKeepsTheNameForTLS(t *testing.T) {
 	ns := newNamedServer(t, "api.other.invalid")
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, ns.srv)
-	peer := discoveredPeer("api.b.invalid", ns.address().Port, ns.address())
+	peer := discoveredPeer("api.b.invalid", ns.address().Port, ns.address(), ns.srv.Certificate())
 	_, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."})
 	var mismatch x509.HostnameError
 	if !errors.As(err, &mismatch) {
@@ -131,7 +135,7 @@ func TestAPIDialsTheNewAddressAfterRediscovery(t *testing.T) {
 	const name = "api.b.invalid"
 	old, fresh := newNamedServer(t, name), newNamedServer(t, name)
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, old.srv, fresh.srv)
-	peer := discoveredPeer(name, old.address().Port, old.address())
+	peer := discoveredPeer(name, old.address().Port, old.address(), old.srv.Certificate(), fresh.srv.Certificate())
 	ctx := context.Background()
 
 	if _, err := tr.Hello(ctx, peer, &HelloRequest{SenderID: "a.example."}); err != nil {
@@ -154,3 +158,28 @@ func TestAPIDialsTheNewAddressAfterRediscovery(t *testing.T) {
 		t.Error("the idle connection to the old address is still open")
 	}
 }
+
+// When the peer's TLSA set changes, its idle connections, checked under the
+// old set, are closed: the next request is checked against the new one.
+func TestAPIClosesIdleConnectionsWhenTheTLSAChanges(t *testing.T) {
+	const name = "api.b.invalid"
+	ns := newNamedServer(t, name)
+	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, ns.srv)
+	peer := discoveredPeer(name, ns.address().Port, ns.address(), ns.srv.Certificate())
+	if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); err != nil {
+		t.Fatalf("Hello: %v", err)
+	}
+	withTLSA(peer, ns.srv.Certificate(), otherCertFor(t)) // a rollover adds a record
+	if _, err := tr.Hello(context.Background(), peer, &HelloRequest{SenderID: "a.example."}); err != nil {
+		t.Fatalf("Hello after the TLSA changed: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for ns.closed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ns.closed.Load() == 0 {
+		t.Error("the idle connection checked under the old TLSA set is still open")
+	}
+}
+
+func otherCertFor(t *testing.T) *x509.Certificate { return otherCert(t) }

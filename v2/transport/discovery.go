@@ -39,7 +39,9 @@ type DiscoveryResult struct {
 	PublicKey    crypto.PublicKey // Decoded public key from JWK
 	KeyAlgorithm string           // Algorithm from JWK (e.g., "ES256")
 	LegacyKeyRR  *dns.KEY         // Legacy KEY record (fallback if no JWK)
-	TLSA         *dns.TLSA        // TLSA record for TLS verification
+	TLSA         TLSASet          // TLSA RRset for TLS verification (its owner even when empty)
+	TLSAFailed   bool             // the TLSA lookup failed: it says nothing, keep what was known
+	tlsaSeq      uint64           // the TLSA lookup's number (nextTLSALookup); zero: numbered when registered
 	APIAddresses []string         // IP addresses for API service from SVCB
 	DNSAddresses []string         // IP addresses for DNS service from SVCB
 	Port         uint16           // Port from URI record
@@ -74,13 +76,30 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 			result.Partial = true
 		}
 
-		// Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
-		tlsaRR, err := imr.lookupAgentTLSA(ctx, apiServiceName, apiPort)
-		if err == nil {
-			result.TLSA = tlsaRR
-		} else {
-			lgTransport().Debug("no TLSA record for API service", "err", err)
+		// The TLSA RRset at _<port>._tcp.api.<identity>: what the peer's
+		// certificate is checked against, at both ends. Without a usable
+		// record the API mechanism is not usable.
+		result.TLSA.Owner = fmt.Sprintf("_%d._tcp.%s", apiPort, dns.Fqdn(apiServiceName))
+		result.tlsaSeq = nextTLSALookup()
+		ans, err := imr.lookupTLSA(ctx, result.TLSA.Owner, false)
+		switch {
+		case err != nil:
+			lgTransport().Debug("TLSA lookup for API service failed", "owner", result.TLSA.Owner, "err", err)
+			result.TLSAFailed = true
 			result.Partial = true
+		case !ans.Validated && imr.RequireDnssecValidation:
+			// Vouches for nothing: refused, as a failed lookup would be.
+			lgTransport().Warn("TLSA for API service not DNSSEC-validated and require-dnssec-validation is set; not used",
+				"owner", result.TLSA.Owner)
+			result.TLSAFailed = true
+			result.Partial = true
+		default:
+			result.TLSA.Records = ans.Records
+			result.TLSA.Validated = ans.Validated
+			if len(ans.Records) == 0 {
+				lgTransport().Debug("no usable TLSA record for API service", "owner", result.TLSA.Owner, "denied", ans.Denied)
+				result.Partial = true
+			}
 		}
 
 		lgTransport().Info("found API endpoint", "uri", apiUri, "host", apiHost)
@@ -309,18 +328,37 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		}
 	}
 
-	// Store TLSA for TLS verification (legacy top-level bytes; the typed
-	// record lands in the per-mechanism crypto slot below)
-	if result.TLSA != nil {
-		peer.setTLSARecord([]byte(result.TLSA.Certificate))
-	}
-
 	// Per-mechanism outcome: ContactInfo + guarded NEEDED→KNOWN promotion +
 	// crypto slots. A mechanism is USABLE only with BOTH a URI and a
 	// resolved address (Fix C); URI-without-address is recorded as
 	// ContactInfo "partial" (the application derives its capability flags
 	// from ContactInfo: "complete"/"partial" ⇒ offered, absent ⇒ not).
-	apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0
+	// The TLSA: an answer, a denial included, replaces the set held. A
+	// lookup that failed says nothing, so the set held stays, unless it is
+	// for another name: the endpoint moved, and the old name's records
+	// vouch for nothing at the new one. Of two answers the later lookup's
+	// is kept (storeMechanismTLSA).
+	tlsaGone := false
+	if result.APIUri != "" && result.TLSA.Owner != "" {
+		seq := result.tlsaSeq
+		if seq == 0 {
+			seq = nextTLSALookup()
+		}
+		switch {
+		case !result.TLSAFailed:
+			prev, stored := peer.storeMechanismTLSA("API", result.TLSA, seq, false)
+			tlsaGone = stored && len(prev.Records) > 0 && len(result.TLSA.Records) == 0
+		case peer.MechanismTLSA("API").Owner != result.TLSA.Owner:
+			prev, stored := peer.storeMechanismTLSA("API", TLSASet{Owner: result.TLSA.Owner}, seq, false)
+			tlsaGone = stored && len(prev.Records) > 0
+		}
+	}
+	// HTTPS to a peer needs a TLSA to check its certificate against: without
+	// one the API mechanism is not usable, and HTTPS is not attempted.
+	// The set held must be for the name discovery found: one for another
+	// name vouches for nothing at this endpoint.
+	apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
+		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
 		peer.SetMechanismContactInfo("API", "complete")
 		// Guarded promotion: do not regress an already-established mechanism.
@@ -331,20 +369,28 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if peer.GetState() < PeerStateKnown {
 			peer.SetState(PeerStateKnown, "discovered via DNS (API usable)")
 		}
-		// TLSA only when discovered: a partial re-discovery must not wipe a
-		// previously pinned certificate (2026-08-25 review, finding 4;
-		// mirrors the JWK rule below).
-		if result.TLSA != nil {
-			peer.SetMechanismTLSA("API", result.TLSA)
-		}
 	} else if result.APIUri != "" {
-		// URI found but no resolved address: keep the mechanism NEEDED so
-		// the retrier revisits it; do not advertise an unusable URL; never
-		// regress an already-established peer.
+		// URI found but no resolved address, or no usable TLSA: keep the
+		// mechanism NEEDED so the retrier revisits it; do not advertise an
+		// unusable URL; never regress an already-established peer.
 		peer.SetMechanismContactInfo("API", "partial")
+		if tlsaGone {
+			// The TLSA it was used with is gone: the mechanism needs
+			// discovery again, which finds a TLSA when one is published.
+			peer.SetMechanismState("API", PeerStateNeeded, "TLSA withdrawn")
+		}
 		raw, _ := peer.MechanismRawState("API")
-		lgTransport().Warn("API endpoint URI found but no resolved address; not marking usable",
-			"identity", result.Identity, "uri", result.APIUri, "state", raw.String())
+		if len(result.APIAddresses) > 0 && tm.APITransport != nil && tm.APITransport.TLSA != nil {
+			// The retrier comes back every interval: at Warn hourly.
+			tm.APITransport.TLSA.NoteNoTLSA(peer, result.TLSA.Owner)
+		} else {
+			why := "no resolved address"
+			if len(result.APIAddresses) > 0 {
+				why = "no usable TLSA at " + result.TLSA.Owner
+			}
+			lgTransport().Warn("API endpoint URI found but not usable; not marking usable",
+				"identity", result.Identity, "uri", result.APIUri, "why", why, "state", raw.String())
+		}
 	}
 
 	if dnsUsable {

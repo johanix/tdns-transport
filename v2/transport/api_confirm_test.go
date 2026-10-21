@@ -175,7 +175,7 @@ func TestAPIConfirmPostsTheDNSConfirmPayload(t *testing.T) {
 	// The HTTPS mechanism posts the same bytes to /msg.
 	rcv := newMsgReceiver(t)
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, rcv.srv)
-	peer := apiPeer(rcv.srv.URL)
+	peer := apiPeer(rcv.srv)
 	if err := tr.Confirm(ctx, peer, testConfirmRequest()); err != nil {
 		t.Fatalf("API Confirm: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestAPIConfirmRefusalIsRetryable(t *testing.T) {
 	rcv := newMsgReceiver(t)
 	rcv.setRefuse(true)
 	tr := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, rcv.srv)
-	err := tr.Confirm(ctx, apiPeer(rcv.srv.URL), testConfirmRequest())
+	err := tr.Confirm(ctx, apiPeer(rcv.srv), testConfirmRequest())
 	var te *TransportError
 	if err == nil || !errors.As(err, &te) || !te.Retryable {
 		t.Fatalf("a refused confirmation: %v, want a retryable *TransportError", err)
@@ -211,7 +211,7 @@ func TestAPIConfirmRefusalIsRetryable(t *testing.T) {
 	}))
 	defer failing.Close()
 	ft := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, failing)
-	err = ft.Confirm(ctx, apiPeer(failing.URL), testConfirmRequest())
+	err = ft.Confirm(ctx, apiPeer(failing), testConfirmRequest())
 	if err == nil || !errors.As(err, &te) || !te.Retryable {
 		t.Fatalf("a confirmation answered HTTP 503: %v, want a retryable *TransportError", err)
 	}
@@ -228,7 +228,7 @@ func TestAPIConfirmRefusalIsRetryable(t *testing.T) {
 	}))
 	defer page.Close()
 	pt := apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, page)
-	if err := pt.Confirm(ctx, apiPeer(page.URL), testConfirmRequest()); err == nil || !errors.As(err, &te) || !te.Retryable {
+	if err := pt.Confirm(ctx, apiPeer(page), testConfirmRequest()); err == nil || !errors.As(err, &te) || !te.Retryable {
 		t.Fatalf("a confirmation answered with a page: %v, want a retryable *TransportError", err)
 	}
 
@@ -251,7 +251,7 @@ func TestManagerConfirmPrefersAPIFallsBackToDNS(t *testing.T) {
 		APITransport: apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, rcv.srv),
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
-	peer := apiPeer(rcv.srv.URL)
+	peer := apiPeer(rcv.srv)
 	peer.SetDiscoveryAddress(dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
@@ -309,7 +309,7 @@ func TestManagerConfirmHangingAPILeavesDNSTime(t *testing.T) {
 		APITransport: apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 10 * time.Second}, hanging),
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
-	peer := apiPeer(hanging.URL)
+	peer := apiPeer(hanging)
 	peer.SetDiscoveryAddress(dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 

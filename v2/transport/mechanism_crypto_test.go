@@ -14,8 +14,8 @@ func TestMechanismCryptoAccessors(t *testing.T) {
 	p := NewPeer("agent.crypto.test.")
 
 	t.Run("empty peer returns zero values", func(t *testing.T) {
-		if p.MechanismTLSA("API") != nil {
-			t.Fatal("expected nil TLSA on fresh peer")
+		if set := p.MechanismTLSA("API"); set.Owner != "" || len(set.Records) != 0 || p.HasMechanismTLSA("API") {
+			t.Fatal("expected no TLSA on fresh peer")
 		}
 		if jwk, alg := p.MechanismJWK("DNS"); jwk != "" || alg != "" {
 			t.Fatal("expected empty JWK on fresh peer")
@@ -28,14 +28,14 @@ func TestMechanismCryptoAccessors(t *testing.T) {
 	t.Run("set and get per mechanism, independently", func(t *testing.T) {
 		tlsa := &dns.TLSA{Usage: 3, Selector: 1, MatchingType: 1, Certificate: "abcd"}
 		key := &dns.KEY{}
-		p.SetMechanismTLSA("API", tlsa)
+		p.SetMechanismTLSA("API", TLSASet{Owner: "_443._tcp.api.agent.crypto.test.", Records: []*dns.TLSA{tlsa}, Validated: true})
 		p.SetMechanismJWK("DNS", `{"kty":"OKP"}`, "Ed25519")
 		p.SetMechanismKeyRR("DNS", key)
 
-		if got := p.MechanismTLSA("API"); got != tlsa {
+		if got := p.MechanismTLSA("API"); len(got.Records) != 1 || got.Records[0] != tlsa || !got.Validated || !p.HasMechanismTLSA("API") {
 			t.Fatal("API TLSA not returned")
 		}
-		if got := p.MechanismTLSA("DNS"); got != nil {
+		if p.HasMechanismTLSA("DNS") {
 			t.Fatal("DNS must not see the API TLSA")
 		}
 		jwk, alg := p.MechanismJWK("DNS")
@@ -48,9 +48,9 @@ func TestMechanismCryptoAccessors(t *testing.T) {
 	})
 
 	t.Run("replace semantics: TLSA/KeyRR overwrite, including to nil", func(t *testing.T) {
-		p.SetMechanismTLSA("API", nil)
-		if p.MechanismTLSA("API") != nil {
-			t.Fatal("re-discovery must be able to clear the TLSA")
+		p.SetMechanismTLSA("API", TLSASet{Owner: "_443._tcp.api.agent.crypto.test.", Validated: true})
+		if p.HasMechanismTLSA("API") || p.MechanismTLSA("API").Owner == "" {
+			t.Fatal("a withdrawal must clear the records and keep the name")
 		}
 		p.SetMechanismKeyRR("DNS", nil)
 		if p.MechanismKeyRR("DNS") != nil {
