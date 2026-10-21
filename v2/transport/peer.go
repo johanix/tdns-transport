@@ -121,6 +121,11 @@ type Peer struct {
 	// "API", "DNS". Access ONLY via the MechanismTLSA/JWK/KeyRR accessors
 	// (they hold p.mu); lazily allocated.
 	mechanismCrypto map[string]*mechanismCrypto
+
+	// discovery is what the last discovery found out about the peer's DNS
+	// data: the DNSSEC verdicts, when the data expires, and why discovery
+	// failed (discovery_status.go). Through DiscoveryStatus.
+	discovery DiscoveryStatus
 }
 
 // MechanismState tracks per-mechanism (e.g. "API", "DNS") state for a

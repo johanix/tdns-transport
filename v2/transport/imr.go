@@ -34,8 +34,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/cache"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -61,37 +63,91 @@ func (imr *Imr) requireValidated(resp *tdns.ImrResponse, rrtype, qname string) e
 	return fmt.Errorf("%s at %s is not DNSSEC-validated and require-dnssec-validation is set", rrtype, qname)
 }
 
+// discoveryQuery asks the resolver for <qname, qtype> on discovery's behalf,
+// typ naming the type for the operator. It returns the records when there
+// are some to use, and in every case what the lookup saw: the verdict on the
+// answer or the denial, when it expires from the cache, and why it gave
+// nothing to use. A lookup that gives nothing to use also returns an error
+// that carries its lookup (lookupOf).
+//
+// Validation is judged before the records are looked for. With validation
+// required, a denial that was not validated is no proof that the records do
+// not exist, and is refused as an answer would be: a forged denial of the
+// API's URI would otherwise pass as "no API".
+func (imr *Imr) discoveryQuery(ctx context.Context, qname string, qtype uint16, typ string) (*core.RRset, DiscoveryLookup, error) {
+	l := DiscoveryLookup{Type: typ, Owner: qname}
+	fail := func(f DiscoveryFailure, detail string) (*core.RRset, DiscoveryLookup, error) {
+		l.Failure, l.Detail = f, detail
+		return nil, l, &lookupError{lookup: l}
+	}
+	resp, err := imr.ImrQuery(ctx, qname, qtype, dns.ClassINET, nil)
+	if err != nil {
+		msg := ""
+		if resp != nil {
+			msg = resp.ErrorMsg
+		}
+		return fail(failureOf(err, msg), fmt.Sprintf("query failed: %v", err))
+	}
+	if resp == nil {
+		return fail(FailureQuery, "query failed: no response")
+	}
+	if resp.Error {
+		return fail(failureOf(nil, resp.ErrorMsg), "query failed: "+resp.ErrorMsg)
+	}
+	l.Chain = chainOf(resp)
+	l.Expires = resp.Expiration
+	found := resp.RRset != nil && len(resp.RRset.RRs) > 0
+	what := "answer"
+	if !found {
+		what = "denial"
+	}
+	if imr.requireValidated(resp, typ, qname) != nil {
+		// Refused for want of a validated chain: not secure, whatever the
+		// resolver could tell about it.
+		if l.Chain < ChainInsecure {
+			l.Chain = ChainInsecure
+		}
+		return fail(FailureNotValidated, verdictDetail(what, l.Chain, true))
+	}
+	if !found {
+		detail := "no " + typ + " record"
+		if resp.Denial == cache.ContextNXDOMAIN {
+			detail = "no such name"
+		}
+		return fail(FailureNoRecords, detail)
+	}
+	if l.Chain != ChainSecure {
+		l.Detail = verdictDetail(what, l.Chain, false)
+	}
+	return resp.RRset, l, nil
+}
+
+// unusable makes l the lookup of records none of which can be used.
+func unusable(l DiscoveryLookup, detail string) (DiscoveryLookup, error) {
+	l.Failure, l.Detail = FailureNoRecords, detail
+	return l, &lookupError{lookup: l}
+}
+
 // lookupAgentJWK looks up the JWK record for an agent identity.
-// Returns: (jwk-data, public-key, algorithm, error)
+// Returns: (jwk-data, public-key, algorithm, the lookup, error)
 //
 // The JWK record contains a base64url-encoded JSON Web Key per RFC 7517.
 // This function decodes the JWK to a crypto.PublicKey for immediate use.
 //
 // JWK records are published at dns.<identity> following DNS transport
 // naming conventions.
-func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, error) {
+func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, DiscoveryLookup, error) {
 	identity = dns.Fqdn(identity)
 
 	jwkQname := "dns." + identity
 	lgTransport().Debug("looking up JWK", "qname", jwkQname)
 
-	resp, err := imr.ImrQuery(ctx, jwkQname, core.TypeJWK, dns.ClassINET, nil)
+	rrset, l, err := imr.discoveryQuery(ctx, jwkQname, core.TypeJWK, "JWK")
 	if err != nil {
-		return "", nil, "", fmt.Errorf("JWK query failed for %s: %w", jwkQname, err)
+		return "", nil, "", l, err
 	}
 
-	if resp.Error {
-		return "", nil, "", fmt.Errorf("JWK query error for %s: %s", jwkQname, resp.ErrorMsg)
-	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return "", nil, "", fmt.Errorf("no JWK record found at %s", jwkQname)
-	}
-	if err := imr.requireValidated(resp, "JWK", jwkQname); err != nil {
-		return "", nil, "", err
-	}
-
-	for _, rr := range resp.RRset.RRs {
+	for _, rr := range rrset.RRs {
 		if privateRR, ok := rr.(*dns.PrivateRR); ok {
 			if jwk, ok := privateRR.Data.(*core.JWK); ok {
 				if err := core.ValidateJWK(jwk.JWKData); err != nil {
@@ -106,73 +162,53 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 				}
 
 				lgTransport().Debug("found JWK record", "qname", jwkQname, "algorithm", algorithm)
-				return jwk.JWKData, publicKey, algorithm, nil
+				return jwk.JWKData, publicKey, algorithm, l, nil
 			}
 		}
 	}
 
-	return "", nil, "", fmt.Errorf("no valid JWK record found at %s", jwkQname)
+	l, err = unusable(l, "no valid JWK record")
+	return "", nil, "", l, err
 }
 
 // lookupAgentKEY looks up the KEY record for an agent identity
 // (legacy fallback when JWK is unavailable).
-func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
+func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, DiscoveryLookup, error) {
 	identity = dns.Fqdn(identity)
 
 	lgTransport().Debug("looking up KEY (legacy fallback)", "identity", identity)
 
-	resp, err := imr.ImrQuery(ctx, identity, dns.TypeKEY, dns.ClassINET, nil)
+	rrset, l, err := imr.discoveryQuery(ctx, identity, dns.TypeKEY, "KEY")
 	if err != nil {
-		return nil, fmt.Errorf("KEY query failed for %s: %w", identity, err)
+		return nil, l, err
 	}
 
-	if resp.Error {
-		return nil, fmt.Errorf("KEY query error for %s: %s", identity, resp.ErrorMsg)
-	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return nil, fmt.Errorf("no KEY record found for %s", identity)
-	}
-	if err := imr.requireValidated(resp, "KEY", identity); err != nil {
-		return nil, err
-	}
-
-	for _, rr := range resp.RRset.RRs {
+	for _, rr := range rrset.RRs {
 		if keyRR, ok := rr.(*dns.KEY); ok {
 			lgTransport().Debug("found KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
-			return keyRR, nil
+			return keyRR, l, nil
 		}
 	}
 
-	return nil, fmt.Errorf("no valid KEY record found for %s", identity)
+	l, err = unusable(l, "no valid KEY record")
+	return nil, l, err
 }
 
 // lookupAgentAPIEndpoint looks up the API endpoint URI for an agent.
 // Queries: _https._tcp.<identity> URI
-// Returns: (uri, host, port, error)
-func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+// Returns: (uri, host, port, the lookup, error)
+func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, DiscoveryLookup, error) {
 	identity = dns.Fqdn(identity)
 
 	apiQname := "_https._tcp." + identity
 	lgTransport().Debug("looking up API URI", "qname", apiQname)
 
-	resp, err := imr.ImrQuery(ctx, apiQname, dns.TypeURI, dns.ClassINET, nil)
+	rrset, l, err := imr.discoveryQuery(ctx, apiQname, dns.TypeURI, "URI")
 	if err != nil {
-		return "", "", 0, fmt.Errorf("API URI query failed for %s: %w", apiQname, err)
+		return "", "", 0, l, err
 	}
 
-	if resp.Error {
-		return "", "", 0, fmt.Errorf("API URI query error for %s: %s", apiQname, resp.ErrorMsg)
-	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return "", "", 0, fmt.Errorf("no API URI record found at %s", apiQname)
-	}
-	if err := imr.requireValidated(resp, "URI", apiQname); err != nil {
-		return "", "", 0, err
-	}
-
-	for _, rr := range resp.RRset.RRs {
+	for _, rr := range rrset.RRs {
 		if uriRR, ok := rr.(*dns.URI); ok {
 			parsed, err := url.Parse(uriRR.Target)
 			if err != nil {
@@ -196,39 +232,29 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 			}
 
 			lgTransport().Debug("found API URI", "uri", uriRR.Target, "host", host, "port", port)
-			return uriRR.Target, host, port, nil
+			return uriRR.Target, host, port, l, nil
 		}
 	}
 
-	return "", "", 0, fmt.Errorf("no valid API URI record found at %s", apiQname)
+	l, err = unusable(l, "no valid API URI record")
+	return "", "", 0, l, err
 }
 
 // lookupAgentDNSEndpoint looks up the DNS endpoint URI for an agent (optional).
 // Queries: _dns._tcp.<identity> URI
-// Returns: (uri, host, port, error)
-func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+// Returns: (uri, host, port, the lookup, error)
+func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, DiscoveryLookup, error) {
 	identity = dns.Fqdn(identity)
 
 	dnsQname := "_dns._tcp." + identity
 	lgTransport().Debug("looking up DNS URI", "qname", dnsQname)
 
-	resp, err := imr.ImrQuery(ctx, dnsQname, dns.TypeURI, dns.ClassINET, nil)
+	rrset, l, err := imr.discoveryQuery(ctx, dnsQname, dns.TypeURI, "URI")
 	if err != nil {
-		return "", "", 0, fmt.Errorf("DNS URI query failed for %s: %w", dnsQname, err)
+		return "", "", 0, l, err
 	}
 
-	if resp.Error {
-		return "", "", 0, fmt.Errorf("DNS URI query error for %s: %s", dnsQname, resp.ErrorMsg)
-	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return "", "", 0, fmt.Errorf("no DNS URI record found at %s", dnsQname)
-	}
-	if err := imr.requireValidated(resp, "URI", dnsQname); err != nil {
-		return "", "", 0, err
-	}
-
-	for _, rr := range resp.RRset.RRs {
+	for _, rr := range rrset.RRs {
 		if uriRR, ok := rr.(*dns.URI); ok {
 			parsed, err := url.Parse(uriRR.Target)
 			if err != nil {
@@ -248,20 +274,52 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 			}
 
 			lgTransport().Debug("found DNS URI", "uri", uriRR.Target, "host", host, "port", port)
-			return uriRR.Target, host, port, nil
+			return uriRR.Target, host, port, l, nil
 		}
 	}
 
-	return "", "", 0, fmt.Errorf("no valid DNS URI record found at %s", dnsQname)
+	l, err = unusable(l, "no valid DNS URI record")
+	return "", "", 0, l, err
 }
 
 // tlsaAnswer is what the resolver said about a TLSA name: the usable
-// records there, or that the name or the type does not exist, and whether
-// the answer was DNSSEC-validated.
+// records there, or that the name or the type does not exist, whether
+// the answer was DNSSEC-validated, the verdict on it, and when it expires
+// from the cache.
 type tlsaAnswer struct {
 	Records   []*dns.TLSA // usable records only (usableTLSA)
 	Denied    bool        // NXDOMAIN or NODATA: there is no TLSA at the name
 	Validated bool
+	Chain     ChainStatus
+	Expires   time.Time // zero when not known
+}
+
+// lookup is the answer as one of the peer's discovery lookups, required
+// telling whether validation is required.
+func (a tlsaAnswer) lookup(owner string, required bool) DiscoveryLookup {
+	l := DiscoveryLookup{Mechanism: "API", Type: "TLSA", Owner: owner, Chain: a.Chain, Expires: a.Expires}
+	what := "answer"
+	if a.Denied {
+		what = "denial"
+	}
+	switch {
+	case !a.Validated && required:
+		if l.Chain < ChainInsecure {
+			l.Chain = ChainInsecure
+		}
+		l.Failure, l.Detail = FailureNotValidated, verdictDetail(what, l.Chain, true)
+	case len(a.Records) == 0:
+		l.Failure, l.Detail = FailureNoRecords, "no usable TLSA record"
+	case l.Chain != ChainSecure:
+		l.Detail = verdictDetail(what, l.Chain, false)
+	}
+	return l
+}
+
+// failedTLSALookup is the TLSA lookup at owner that failed with err.
+func failedTLSALookup(owner string, err error) DiscoveryLookup {
+	return DiscoveryLookup{Mechanism: "API", Type: "TLSA", Owner: owner,
+		Failure: failureOf(err, ""), Detail: fmt.Sprintf("query failed: %v", err)}
 }
 
 // requireValidation reports whether the resolver is set to require DNSSEC
@@ -316,9 +374,9 @@ func tlsaAnswerFrom(owner string, resp *tdns.ImrResponse) (tlsaAnswer, error) {
 	}
 	// Denial is NXDOMAIN or NODATA, and zero for an answer.
 	if resp.Denial != 0 {
-		return tlsaAnswer{Denied: true, Validated: resp.Validated}, nil
+		return tlsaAnswer{Denied: true, Validated: resp.Validated, Chain: chainOf(resp), Expires: resp.Expiration}, nil
 	}
-	ans := tlsaAnswer{Validated: resp.Validated}
+	ans := tlsaAnswer{Validated: resp.Validated, Chain: chainOf(resp), Expires: resp.Expiration}
 	if resp.RRset != nil {
 		for _, rr := range resp.RRset.RRs {
 			if t, ok := rr.(*dns.TLSA); ok && usableTLSA(t) {
@@ -332,31 +390,20 @@ func tlsaAnswerFrom(owner string, resp *tdns.ImrResponse) (tlsaAnswer, error) {
 // lookupServiceAddresses looks up SVCB record for a service name.
 // Queries SVCB at the service name (e.g., dns.<identity> or
 // api.<identity>). Returns addresses extracted from ipv4hint and
-// ipv6hint parameters.
-func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) ([]string, error) {
+// ipv6hint parameters, and the lookup.
+func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) ([]string, DiscoveryLookup, error) {
 	serviceName = dns.Fqdn(serviceName)
 
 	var addresses []string
 
 	lgTransport().Debug("looking up SVCB", "service", serviceName)
 
-	resp, err := imr.ImrQuery(ctx, serviceName, dns.TypeSVCB, dns.ClassINET, nil)
+	rrset, l, err := imr.discoveryQuery(ctx, serviceName, dns.TypeSVCB, "SVCB")
 	if err != nil {
-		return nil, fmt.Errorf("SVCB query failed for %s: %w", serviceName, err)
+		return nil, l, err
 	}
 
-	if resp.Error {
-		return nil, fmt.Errorf("SVCB query error for %s: %s", serviceName, resp.ErrorMsg)
-	}
-
-	if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
-		return nil, fmt.Errorf("no SVCB record found at %s", serviceName)
-	}
-	if err := imr.requireValidated(resp, "SVCB", serviceName); err != nil {
-		return nil, err
-	}
-
-	for _, rr := range resp.RRset.RRs {
+	for _, rr := range rrset.RRs {
 		if svcbRR, ok := rr.(*dns.SVCB); ok {
 			for _, kv := range svcbRR.Value {
 				if kv.Key() == dns.SVCB_IPV4HINT {
@@ -378,9 +425,10 @@ func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) 
 	}
 
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("no IP hints found in SVCB record at %s", serviceName)
+		l, err = unusable(l, "no IP hints in the SVCB record")
+		return nil, l, err
 	}
 
 	lgTransport().Debug("found addresses from SVCB", "count", len(addresses), "service", serviceName, "addresses", addresses)
-	return addresses, nil
+	return addresses, l, nil
 }

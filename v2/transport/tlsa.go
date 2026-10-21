@@ -193,6 +193,12 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 		c.noteLookupFailed(peer, set.Owner, err)
 		return TLSASet{}, fmt.Errorf("%w: %s (%s): %v", ErrTLSALookup, peer.ID, set.Owner, err)
 	}
+	// What the answer says about the peer's chain goes on its discovery
+	// status, whether the answer is used or refused. A failed lookup says
+	// nothing, and leaves the status as it was.
+	l := ans.lookup(set.Owner, src.requireValidation())
+	l.Mechanism = mechanism
+	peer.noteLookup(l)
 	if !ans.Validated {
 		if src.requireValidation() {
 			err := errors.New("the answer is not DNSSEC-validated and validation is required")
