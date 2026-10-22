@@ -291,7 +291,7 @@ func (imr *Imr) discoverAgent(ctx context.Context, identity string, apiSupported
 // verification keys (SecureWrapper), ContactInfo, and the guarded
 // NEEDED→KNOWN promotions. Fires tm.OnPeerDiscovered(peer) on success, so
 // the application can materialize its own view of the peer.
-func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) error {
+func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err error) {
 	if result.Error != nil {
 		return fmt.Errorf("cannot register peer with discovery error: %w", result.Error)
 	}
@@ -304,7 +304,21 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// Setting it unconditionally made EffectiveState() report KNOWN for an
 	// unreachable peer — the KNOWN/NEEDED contradiction (Fix C).
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
-	peer.setDiscoveryStatus(result.status(time.Now()))
+	st := result.status(time.Now())
+	peer.setDiscoveryStatus(st)
+	// A registration that fails further down is a discovery that gave
+	// nothing to use: the status says why, and the refresh asks again.
+	defer func() {
+		if err != nil && st.Failure == FailureNone {
+			st.Failure, st.Reason = FailureNoRecords, err.Error()
+			peer.setDiscoveryStatus(st)
+		}
+	}()
+	// Before any return: a mechanism refused for want of validation is not
+	// used any more, also when the registration fails further down. A
+	// refused mechanism is never usable (DiscoveryResult.refused), so no
+	// promotion below undoes this.
+	tm.demoteRefused(peer, result)
 
 	// Register API transport address
 	// Register the JWK public key (preferred) with the payload crypto
@@ -517,8 +531,6 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		lgTransport().Warn("DNS endpoint URI found but no resolved address; not marking usable",
 			"identity", result.Identity, "uri", result.DNSUri, "state", raw.String())
 	}
-
-	tm.demoteRefused(peer, result)
 
 	// The process is complete — hand the peer to the application so it can
 	// materialize its own view (capability flags, registry entry). This is

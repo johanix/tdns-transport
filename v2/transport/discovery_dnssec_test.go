@@ -548,3 +548,28 @@ func TestAStaleErrorDoesNotStandInForThePeer(t *testing.T) {
 		t.Errorf("refused, the peer reads %v, want NEEDED", st)
 	}
 }
+
+// A registration that fails further down still takes a refused mechanism
+// out of use, and its status says it failed, so the refresh asks again
+// (CodeRabbit on #37: the demotion came after the early returns).
+func TestARefusedMechanismIsDemotedWhenTheRegistrationFails(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
+	p := tm.PeerRegistry.GetOrCreate("b.example.")
+	p.SetMechanismState("API", PeerStateOperational, "hello")
+	err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity: "b.example.",
+		APIUri:   "https://api.b.example.:%zz/api",
+		Lookups: []DiscoveryLookup{{Mechanism: "API", Type: "SVCB", Owner: "api.b.example.",
+			Chain: ChainInsecure, Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"}},
+	})
+	if err == nil {
+		t.Fatal("a registration with an invalid URI did not fail")
+	}
+	if st, _ := p.MechanismRawState("API"); st != PeerStateNeeded {
+		t.Errorf("API state %v, want NEEDED: the refusal is to take it out of use whatever else fails", st)
+	}
+	s := p.DiscoveryStatus()
+	if s.Failure == FailureNone || !strings.Contains(s.Reason, "invalid API URI") {
+		t.Errorf("status failure %v reason %q: want the registration's failure", s.Failure, s.Reason)
+	}
+}
