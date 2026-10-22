@@ -372,8 +372,9 @@ func (p *Peer) noteLookup(l DiscoveryLookup) {
 // information partial: what it was used with can be used no longer. It
 // returns the state it had and whether it was past NEEDED; a mechanism that
 // was not keeps its state and gets the reason. When no mechanism is left
-// past NEEDED, the peer's own state follows: EffectiveState falls back to
-// it then.
+// past NEEDED, the peer's own state follows, from any state: EffectiveState
+// falls back to it then, and an ERROR left from a failed discovery before
+// the peer was found would be shown in its place.
 func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -398,7 +399,7 @@ func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 			return was, demoted
 		}
 	}
-	if pastNeeded(p.State) {
+	if p.State != PeerStateNeeded {
 		p.State, p.StateReason, p.StateChanged = PeerStateNeeded, reason, time.Now()
 	}
 	return was, demoted

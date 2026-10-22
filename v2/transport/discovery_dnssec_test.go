@@ -525,3 +525,26 @@ func TestMechanismExpires(t *testing.T) {
 		t.Error("a mechanism with no lookups has an expiry")
 	}
 }
+
+// An ERROR left from a failed discovery before the peer was found does not
+// stand in for it later: a successful discovery clears it, and when the
+// peer's mechanisms are refused the peer is NEEDED, not ERROR (seen on the
+// rig, run260b: the gossip cell read ERROR(-) where peer list read NEEDED(-)).
+func TestAStaleErrorDoesNotStandInForThePeer(t *testing.T) {
+	imr := cachedPeerImr(t, true, cache.ValidationStateSecure, 600)
+	tm, peer := apiManager(imr)
+	peer.SetState(PeerStateError, "an early discovery failed")
+	if err := discoverWithin(t, tm); err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	if st := peer.GetState(); st != PeerStateKnown {
+		t.Errorf("after a successful discovery the peer's state is %v, want KNOWN", st)
+	}
+	peer.SetMechanismState("API", PeerStateOperational, "hello")
+	peer.SetState(PeerStateError, "an early discovery failed, again")
+	cacheAnswer(t, imr.Imr, "_https._tcp."+dnssecPeer+" IN URI 10 1 \"https://api.agent.example.:8443/api\"", cache.ValidationStateInsecure, 600)
+	_ = discoverWithin(t, tm)
+	if st := peer.EffectiveState(); st != PeerStateNeeded {
+		t.Errorf("refused, the peer reads %v, want NEEDED", st)
+	}
+}

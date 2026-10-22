@@ -86,13 +86,15 @@ func (imr *Imr) discoveryQuery(ctx context.Context, qname string, qtype uint16, 
 		if resp != nil {
 			msg = resp.ErrorMsg
 		}
-		return fail(failureOf(err, msg), fmt.Sprintf("query failed: %v", err))
+		f := failureOf(err, msg)
+		return fail(f, fmt.Sprintf("%s: %v", f, err))
 	}
 	if resp == nil {
 		return fail(FailureQuery, "query failed: no response")
 	}
 	if resp.Error {
-		return fail(failureOf(nil, resp.ErrorMsg), "query failed: "+resp.ErrorMsg)
+		f := failureOf(nil, resp.ErrorMsg)
+		return fail(f, f.String()+": "+resp.ErrorMsg)
 	}
 	l.Chain = chainOf(resp)
 	l.Expires = resp.Expiration
@@ -318,8 +320,8 @@ func (a tlsaAnswer) lookup(owner string, required bool) DiscoveryLookup {
 
 // failedTLSALookup is the TLSA lookup at owner that failed with err.
 func failedTLSALookup(owner string, err error) DiscoveryLookup {
-	return DiscoveryLookup{Mechanism: "API", Type: "TLSA", Owner: owner,
-		Failure: failureOf(err, ""), Detail: fmt.Sprintf("query failed: %v", err)}
+	f := failureOf(err, "")
+	return DiscoveryLookup{Mechanism: "API", Type: "TLSA", Owner: owner, Failure: f, Detail: fmt.Sprintf("%s: %v", f, err)}
 }
 
 // requireValidation reports whether the resolver is set to require DNSSEC

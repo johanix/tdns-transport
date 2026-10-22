@@ -297,7 +297,10 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	}
 
 	// The top-level peer State is promoted to KNOWN further down, but ONLY
-	// for a mechanism that actually became usable (URI + resolved address).
+	// for a mechanism that actually became usable (URI + resolved address);
+	// from ERROR too, which a failed discovery before this one leaves (the
+	// application's OnDiscoveryFailed), and which EffectiveState shows once
+	// no mechanism is active.
 	// Setting it unconditionally made EffectiveState() report KNOWN for an
 	// unreachable peer — the KNOWN/NEEDED contradiction (Fix C).
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
@@ -463,7 +466,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if raw, ok := peer.MechanismRawState("API"); !ok || raw <= PeerStateNeeded {
 			peer.SetMechanismState("API", PeerStateKnown, "discovered via DNS (API usable)")
 		}
-		if peer.GetState() < PeerStateKnown {
+		if st := peer.GetState(); st < PeerStateKnown || st == PeerStateError {
 			peer.SetState(PeerStateKnown, "discovered via DNS (API usable)")
 		}
 	} else if result.APIUri != "" {
@@ -495,7 +498,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if raw, ok := peer.MechanismRawState("DNS"); !ok || raw <= PeerStateNeeded {
 			peer.SetMechanismState("DNS", PeerStateKnown, "discovered via DNS (DNS usable)")
 		}
-		if peer.GetState() < PeerStateKnown {
+		if st := peer.GetState(); st < PeerStateKnown || st == PeerStateError {
 			peer.SetState(PeerStateKnown, "discovered via DNS (DNS usable)")
 		}
 		// JWK only when discovered (a partial re-discovery must not wipe a
