@@ -194,7 +194,7 @@ func verdictDetail(what string, chain ChainStatus, required bool) string {
 	if required {
 		return fmt.Sprintf("%s %s, DNSSEC validation required", what, chain)
 	}
-	return fmt.Sprintf("%s %s, accepted as DNSSEC validation is off", what, chain)
+	return fmt.Sprintf("%s %s, accepted as DNSSEC validation is not enforced", what, chain)
 }
 
 // DiscoveryStatus is what the last discovery of a peer found out about its

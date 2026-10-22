@@ -153,8 +153,8 @@ func TestDiscoveryRefusedForWantOfValidationSaysSo(t *testing.T) {
 	}
 }
 
-// Validation off: the same records are used, and the status says the chain
-// is not secure, and that they were taken anyway.
+// Validation not enforced: the same records are used, and the status says
+// the chain is not secure, and that they were taken anyway.
 func TestDiscoveryWithValidationOffMarksTheChain(t *testing.T) {
 	for _, tc := range []struct {
 		state cache.ValidationState
@@ -177,7 +177,7 @@ func TestDiscoveryWithValidationOffMarksTheChain(t *testing.T) {
 			if c := s.MechanismChain("API"); c != tc.want {
 				t.Errorf("API chain %v, want %v", c, tc.want)
 			}
-			if r := s.MechanismReason("API"); !strings.Contains(r, "accepted as DNSSEC validation is off") {
+			if r := s.MechanismReason("API"); !strings.Contains(r, "accepted as DNSSEC validation is not enforced") {
 				t.Errorf("reason %q: want it to say the data was taken with validation off", r)
 			}
 		})
@@ -340,7 +340,7 @@ func TestFailureOf(t *testing.T) {
 func TestMechanismReasonPrefersTheTellingFailure(t *testing.T) {
 	s := DiscoveryStatus{Lookups: []DiscoveryLookup{
 		{Mechanism: "DNS", Type: "URI", Owner: "_dns._tcp.x.", Failure: FailureNoRecords, Detail: "no such name"},
-		{Mechanism: "API", Type: "URI", Owner: "_https._tcp.x.", Chain: ChainInsecure, Detail: "answer insecure, accepted as DNSSEC validation is off"},
+		{Mechanism: "API", Type: "URI", Owner: "_https._tcp.x.", Chain: ChainInsecure, Detail: "answer insecure, accepted as DNSSEC validation is not enforced"},
 		{Mechanism: "API", Type: "SVCB", Owner: "api.x.", Chain: ChainBogus, Failure: FailureNotValidated, Detail: "answer bogus, DNSSEC validation required"},
 	}}
 	if r := s.MechanismReason("API"); r != "SVCB at api.x.: answer bogus, DNSSEC validation required" {
