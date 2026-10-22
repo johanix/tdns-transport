@@ -7,10 +7,10 @@ replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
 require (
 	github.com/cloudflare/circl v1.6.3
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/johanix/tdns/v2 v2.0.0-20261021184231-42d0f0a7577b
-	github.com/johanix/tdns/v2/cache v0.0.0-20261021184231-42d0f0a7577b
-	github.com/johanix/tdns/v2/core v0.0.0-20261021184231-42d0f0a7577b
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261021184231-42d0f0a7577b
+	github.com/johanix/tdns/v2 v2.0.0-20261022134243-9036c644f36f
+	github.com/johanix/tdns/v2/cache v0.0.0-20261022134243-9036c644f36f
+	github.com/johanix/tdns/v2/core v0.0.0-20261022134243-9036c644f36f
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261022134243-9036c644f36f
 	github.com/miekg/dns v1.1.70
 )
 
