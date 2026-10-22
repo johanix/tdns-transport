@@ -159,12 +159,15 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 			result.TLSAFailed = true
 			result.Partial = true
 		case !ans.Validated && imr.RequireDnssecValidation:
-			// Vouches for nothing: refused, as a failed lookup would be.
+			// Vouches for nothing, and nor does the set held from before:
+			// that was validated when it was looked up, and has expired
+			// since. Registered as an empty set, so the one held is dropped,
+			// as the TLSA checker drops it; the mechanism is refused
+			// (DiscoveryResult.refused).
 			l := ans.lookup(result.TLSA.Owner, true)
 			result.saw("API", l)
 			lgTransport().Warn("TLSA for API service not DNSSEC-validated and require-dnssec-validation is set; not used",
 				"owner", result.TLSA.Owner, "lookup", l.String())
-			result.TLSAFailed = true
 			result.Partial = true
 		default:
 			result.saw("API", ans.lookup(result.TLSA.Owner, imr.RequireDnssecValidation))
@@ -468,7 +471,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		// mechanism NEEDED so the retrier revisits it; do not advertise an
 		// unusable URL; never regress an already-established peer.
 		peer.SetMechanismContactInfo("API", "partial")
-		if tlsaGone {
+		if tlsaGone && !apiRefused {
 			// The TLSA it was used with is gone: the mechanism needs
 			// discovery again, which finds a TLSA when one is published.
 			peer.SetMechanismState("API", PeerStateNeeded, "TLSA withdrawn")

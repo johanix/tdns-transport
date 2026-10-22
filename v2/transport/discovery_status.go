@@ -224,6 +224,33 @@ func (s DiscoveryStatus) MechanismChain(mechanism string) ChainStatus {
 	return worst
 }
 
+// MechanismExpires is when the data of one mechanism ("API", "DNS") expires
+// from the cache: the earliest expiry among its lookups. Zero when none is
+// known. The peer is looked up again at Expires, the earliest of all.
+func (s DiscoveryStatus) MechanismExpires(mechanism string) time.Time {
+	var exp time.Time
+	for _, l := range s.Lookups {
+		if l.Mechanism == mechanism && !l.Expires.IsZero() && (exp.IsZero() || l.Expires.Before(exp)) {
+			exp = l.Expires
+		}
+	}
+	return exp
+}
+
+// saysNothing reports whether a lookup that failed so says nothing about the
+// data it was for: it could not run. A refusal and a denial are answers.
+func (f DiscoveryFailure) saysNothing() bool { return f == FailureUnreachable || f == FailureQuery }
+
+// findLookup returns the lookup of the mechanism's RRset of that type.
+func findLookup(lookups []DiscoveryLookup, mechanism, typ string) (DiscoveryLookup, bool) {
+	for _, l := range lookups {
+		if l.Mechanism == mechanism && l.Type == typ {
+			return l, true
+		}
+	}
+	return DiscoveryLookup{}, false
+}
+
 // MechanismReason says, for one mechanism ("" for all), what an operator
 // needs to know about its data: the lookup that failed, the most telling
 // failure first, and otherwise the lookup with the worst verdict when that
@@ -278,18 +305,42 @@ func (p *Peer) DiscoveryStatus() DiscoveryStatus {
 	return p.discovery.copy()
 }
 
-// setDiscoveryStatus records what a discovery of the peer found out.
+// setDiscoveryStatus records what a discovery of the peer found out. A lookup
+// that could not run says nothing about the data it was for, which stays in
+// use: it keeps the verdict and the expiry of the lookup of that RRset
+// before it. When the whole discovery could not run, the lookups it did not
+// get to are kept as they were too, so the marks of the data in use stay.
 func (p *Peer) setDiscoveryStatus(s DiscoveryStatus) {
 	s = s.copy()
-	s.summarize()
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.discovery.Lookups
+	for i := range s.Lookups {
+		l := &s.Lookups[i]
+		if !l.Failure.saysNothing() {
+			continue
+		}
+		if o, ok := findLookup(old, l.Mechanism, l.Type); ok {
+			l.Chain, l.Expires = o.Chain, o.Expires
+		}
+	}
+	if s.Failure.saysNothing() {
+		for _, o := range old {
+			if _, ok := findLookup(s.Lookups, o.Mechanism, o.Type); !ok {
+				s.Lookups = append(s.Lookups, o)
+			}
+		}
+	}
+	s.summarize()
 	p.discovery = s
-	p.mu.Unlock()
 }
 
 // noteLookup records a lookup made for the peer outside a discovery (the
-// TLSA checker's): it replaces the lookup of the same RRset. A peer that
-// discovery has not read is left as it is.
+// TLSA checker's): it replaces the lookup of the same RRset. A lookup that
+// gave nothing to use leaves the time of the next refresh where it was: the
+// expiry it carries is that of an answer that is not used, and a later one
+// would put off the refresh that a refusal needs. A peer that discovery has
+// not read is left as it is.
 func (p *Peer) noteLookup(l DiscoveryLookup) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -300,11 +351,17 @@ func (p *Peer) noteLookup(l DiscoveryLookup) {
 	replaced := false
 	for i := range lookups {
 		if lookups[i].Mechanism == l.Mechanism && lookups[i].Type == l.Type {
+			if l.Failure != FailureNone {
+				l.Expires = lookups[i].Expires
+			}
 			lookups[i] = l
 			replaced = true
 		}
 	}
 	if !replaced {
+		if l.Failure != FailureNone {
+			l.Expires = time.Time{}
+		}
 		lookups = append(lookups, l)
 	}
 	p.discovery.Lookups = lookups

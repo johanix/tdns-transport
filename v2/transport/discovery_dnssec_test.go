@@ -394,3 +394,134 @@ func TestDemoteMechanism(t *testing.T) {
 		t.Error("a NEEDED mechanism was demoted again")
 	}
 }
+
+// The TLSA checker's refusal, with validation required, takes the mechanism
+// out of use as a discovery refusal does: NEEDED, the set it held dropped
+// (so it is not usable), the reason on the status; and the refused answer
+// does not put off the peer's refresh.
+func TestTheCheckersRefusalTakesTheMechanismOutOfUse(t *testing.T) {
+	cert := otherCert(t)
+	p := withTLSA(NewPeer("b.example."), cert)
+	p.SetAPIEndpoint("https://api.b.example.:443/api")
+	p.SetMechanismState("API", PeerStateOperational, "hello")
+	now := time.Now()
+	p.setDiscoveryStatus(DiscoveryStatus{At: now, Lookups: []DiscoveryLookup{
+		{Mechanism: "API", Type: "URI", Owner: "_https._tcp.b.example.", Chain: ChainSecure, Expires: now.Add(10 * time.Minute)},
+		{Mechanism: "API", Type: "TLSA", Owner: "_443._tcp.api.b.example.", Chain: ChainSecure, Expires: now.Add(5 * time.Minute)},
+	}})
+	before := p.DiscoveryStatus().Expires
+	if !p.APIUsable() {
+		t.Fatal("the peer is not usable over the API before the refusal")
+	}
+
+	c := NewTLSAChecker(nil)
+	c.source = &fakeTLSA{strict: true, answers: []fakeAnswer{{ans: tlsaAnswer{
+		Records: []*dns.TLSA{tlsaFor(cert)}, Chain: ChainInsecure, Expires: now.Add(time.Hour)}}}}
+	if _, err := c.Refresh(context.Background(), p, "API"); !errors.Is(err, ErrTLSALookup) {
+		t.Fatalf("Refresh: %v, want ErrTLSALookup", err)
+	}
+	if st, _ := p.MechanismRawState("API"); st != PeerStateNeeded {
+		t.Errorf("API state %v, want NEEDED", st)
+	}
+	if p.HasMechanismTLSA("API") || p.APIUsable() {
+		t.Error("the refused TLSA's mechanism is still usable: the set held from before was kept")
+	}
+	s := p.DiscoveryStatus()
+	if c := s.MechanismChain("API"); c != ChainInsecure {
+		t.Errorf("API chain %v, want insecure", c)
+	}
+	if r := s.MechanismReason("API"); !strings.Contains(r, "TLSA at _443._tcp.api.b.example.: answer insecure, DNSSEC validation required") {
+		t.Errorf("reason %q", r)
+	}
+	if !s.Expires.Equal(before) {
+		t.Errorf("the peer's expiry moved from %v to %v: a refused answer put off the refresh", before, s.Expires)
+	}
+
+	// With validation off the same answer is used, and marked.
+	q := withTLSA(NewPeer("c.example."), cert)
+	q.SetMechanismState("API", PeerStateOperational, "hello")
+	q.setDiscoveryStatus(DiscoveryStatus{At: now, Lookups: []DiscoveryLookup{{Mechanism: "API", Type: "TLSA", Chain: ChainSecure}}})
+	c.source = &fakeTLSA{answers: []fakeAnswer{{ans: tlsaAnswer{Records: []*dns.TLSA{tlsaFor(cert)}, Chain: ChainInsecure}}}}
+	if _, err := c.Refresh(context.Background(), q, "API"); err != nil {
+		t.Fatalf("Refresh with validation off: %v", err)
+	}
+	if st, _ := q.MechanismRawState("API"); st != PeerStateOperational || !q.HasMechanismTLSA("API") {
+		t.Errorf("with validation off: state %v, TLSA held %v: want it in use", st, q.HasMechanismTLSA("API"))
+	}
+	if c := q.DiscoveryStatus().MechanismChain("API"); c != ChainInsecure {
+		t.Errorf("with validation off: chain %v, want insecure (marked)", c)
+	}
+}
+
+// Discovery that refuses a TLSA drops the set held from before, as the
+// checker does, and the mechanism goes back to NEEDED for that reason, not as
+// a withdrawal.
+func TestADiscoveryThatRefusesTheTLSADropsIt(t *testing.T) {
+	imr := cachedPeerImr(t, true, cache.ValidationStateSecure, 600)
+	tm, peer := apiManager(imr)
+	if err := discoverWithin(t, tm); err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	peer.SetMechanismState("API", PeerStateOperational, "hello")
+	cacheAnswer(t, imr.Imr, "_8443._tcp.api."+dnssecPeer+" IN TLSA 3 1 1 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", cache.ValidationStateInsecure, 600)
+	if err := discoverWithin(t, tm); err != nil {
+		t.Fatalf("second discovery: %v", err)
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded {
+		t.Errorf("API state %v, want NEEDED", st)
+	}
+	if peer.HasMechanismTLSA("API") {
+		t.Error("the TLSA set held from before was kept")
+	}
+	if r := peer.DiscoveryStatus().MechanismReason("API"); !strings.Contains(r, "TLSA at") || !strings.Contains(r, "DNSSEC validation required") {
+		t.Errorf("reason %q: want the refused TLSA", r)
+	}
+}
+
+// A lookup that cannot run says nothing about the data, which stays in use:
+// the verdict and the expiry of the lookup before it stay, and when the
+// whole discovery cannot run, the lookups it did not get to stay too.
+func TestALookupThatCannotRunKeepsTheVerdict(t *testing.T) {
+	p := NewPeer("b.example.")
+	exp := time.Now().Add(-time.Minute)
+	p.setDiscoveryStatus(DiscoveryStatus{At: time.Now().Add(-time.Hour), Lookups: []DiscoveryLookup{
+		{Mechanism: "API", Type: "URI", Chain: ChainInsecure, Expires: exp},
+		{Mechanism: "API", Type: "TLSA", Chain: ChainBogus, Expires: exp},
+	}})
+	p.setDiscoveryStatus(DiscoveryStatus{At: time.Now(), Failure: FailureUnreachable, Reason: "unreachable",
+		Lookups: []DiscoveryLookup{{Mechanism: "API", Type: "URI", Failure: FailureUnreachable, Detail: "query failed: i/o timeout"}}})
+	s := p.DiscoveryStatus()
+	if len(s.Lookups) != 2 || s.MechanismChain("API") != ChainBogus {
+		t.Fatalf("lookups %+v: want both kept, the chain still bogus", s.Lookups)
+	}
+	if u, _ := findLookup(s.Lookups, "API", "URI"); u.Chain != ChainInsecure || !u.Expires.Equal(exp) || u.Failure != FailureUnreachable {
+		t.Errorf("the URI lookup %+v: want the failure, with the verdict and expiry from before", u)
+	}
+	if !s.due(time.Now().Add(2 * time.Minute)) {
+		t.Error("a peer whose last discovery could not run is not asked for again")
+	}
+
+	// A refusal is an answer: it replaces what was there.
+	p.setDiscoveryStatus(DiscoveryStatus{At: time.Now(), Failure: FailureNotValidated, Lookups: []DiscoveryLookup{
+		{Mechanism: "API", Type: "URI", Chain: ChainInsecure, Failure: FailureNotValidated}}})
+	if s := p.DiscoveryStatus(); len(s.Lookups) != 1 {
+		t.Errorf("after a refusal: lookups %+v, want only the refusal", s.Lookups)
+	}
+}
+
+func TestMechanismExpires(t *testing.T) {
+	t1, t2 := time.Now().Add(time.Minute), time.Now().Add(time.Hour)
+	s := DiscoveryStatus{Lookups: []DiscoveryLookup{
+		{Mechanism: "API", Type: "URI", Expires: t2},
+		{Mechanism: "API", Type: "TLSA", Expires: t1},
+		{Mechanism: "DNS", Type: "URI", Expires: t2},
+		{Mechanism: "DNS", Type: "JWK"},
+	}}
+	s.summarize()
+	if !s.MechanismExpires("API").Equal(t1) || !s.MechanismExpires("DNS").Equal(t2) || !s.Expires.Equal(t1) {
+		t.Errorf("API %v DNS %v peer %v: want %v %v %v", s.MechanismExpires("API"), s.MechanismExpires("DNS"), s.Expires, t1, t2, t1)
+	}
+	if !s.MechanismExpires("none").IsZero() {
+		t.Error("a mechanism with no lookups has an expiry")
+	}
+}

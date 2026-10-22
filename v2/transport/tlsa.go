@@ -203,6 +203,7 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 		if src.requireValidation() {
 			err := errors.New("the answer is not DNSSEC-validated and validation is required")
 			c.noteLookupFailed(peer, set.Owner, err)
+			c.refuse(peer, mechanism, set.Owner, mine, l)
 			return TLSASet{}, fmt.Errorf("%w: %s (%s): %v", ErrTLSALookup, peer.ID, set.Owner, err)
 		}
 		c.logOnce("unvalidated|"+peer.ID, tlsaWarnLogInterval, func() {
@@ -232,6 +233,24 @@ func (c *TLSAChecker) current(ctx context.Context, peer *Peer, mechanism string,
 		peer.SetMechanismState(mechanism, PeerStateNeeded, "TLSA withdrawn")
 	}
 	return set, nil
+}
+
+// refuse takes peer's mechanism out of use after its TLSA lookup (l, number
+// mine) was refused for want of validation. The set held was validated when
+// it was looked up, has expired from the cache since, and nothing validated
+// replaces it. As when discovery refuses a mechanism's data
+// (DiscoveryResult.refused), the mechanism goes back to NEEDED; and the set
+// is dropped, so that the mechanism is not usable (APIUsable) until
+// discovery finds one that validates. A later lookup's answer, already
+// stored, stands, and the mechanism with it.
+func (c *TLSAChecker) refuse(peer *Peer, mechanism, owner string, mine uint64, l DiscoveryLookup) {
+	if _, stored := peer.storeMechanismTLSA(mechanism, TLSASet{Owner: owner}, mine, true); !stored {
+		return
+	}
+	if was, demoted := peer.demoteMechanism(mechanism, l.String()); demoted {
+		lgTransport().Warn("the peer's TLSA is not DNSSEC-validated any more; the mechanism needs discovery again",
+			"peer", peer.ID, "mechanism", mechanism, "was", was.String(), "lookup", l.String())
+	}
 }
 
 // NoteNoTLSA logs that HTTPS to peer is not attempted for want of a TLSA:
