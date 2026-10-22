@@ -23,9 +23,11 @@ package transport
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -45,8 +47,73 @@ type DiscoveryResult struct {
 	APIAddresses []string         // IP addresses for API service from SVCB
 	DNSAddresses []string         // IP addresses for DNS service from SVCB
 	Port         uint16           // Port from URI record
-	Error        error            // Any error during discovery
+	Error        error            // Any error during discovery; a *DiscoveryError when nothing could be used
 	Partial      bool             // True if some records were found but discovery incomplete
+	// Lookups is what each lookup saw: the DNSSEC verdict on the RRset, when
+	// it expires from the cache, and why it gave nothing to use
+	// (discovery_status.go).
+	Lookups []DiscoveryLookup
+}
+
+// saw records a lookup made for mechanism.
+func (r *DiscoveryResult) saw(mechanism string, l DiscoveryLookup) {
+	l.Mechanism = mechanism
+	r.Lookups = append(r.Lookups, l)
+}
+
+// usable reports whether the result alone makes mechanism usable: for the
+// API a URI, an address and a usable TLSA from this lookup; for DNS a URI,
+// an address and a key.
+func (r *DiscoveryResult) usable(mechanism string) bool {
+	switch mechanism {
+	case "API":
+		return r.APIUri != "" && len(r.APIAddresses) > 0 && !r.TLSAFailed && len(r.TLSA.Records) > 0
+	case "DNS":
+		return r.DNSUri != "" && len(r.DNSAddresses) > 0 && (r.JWKData != "" || r.LegacyKeyRR != nil)
+	}
+	return false
+}
+
+// refused reports whether mechanism's data was refused for want of DNSSEC
+// validation, so that the mechanism cannot be used: some of its lookups were
+// refused, and what the others found does not make it usable. Data that
+// validated when it was looked up is used until it expires from the cache;
+// once a lookup after that is refused, the mechanism has nothing validated
+// to stand on, whatever it held before.
+func (r *DiscoveryResult) refused(mechanism string) (DiscoveryLookup, bool) {
+	if r.usable(mechanism) {
+		return DiscoveryLookup{}, false
+	}
+	for _, l := range r.Lookups {
+		if l.Mechanism == mechanism && l.Failure == FailureNotValidated {
+			return l, true
+		}
+	}
+	return DiscoveryLookup{}, false
+}
+
+// status is the result as the peer's discovery status, at now.
+func (r *DiscoveryResult) status(now time.Time) DiscoveryStatus {
+	s := DiscoveryStatus{At: now, Lookups: r.Lookups}
+	var de *DiscoveryError
+	if errors.As(r.Error, &de) {
+		s.Failure, s.Reason = de.Failure(), de.Error()
+	} else if r.Error != nil {
+		s.Failure, s.Reason = FailureQuery, r.Error.Error()
+	}
+	return s
+}
+
+// logLookup logs a lookup that gave nothing to use: at Debug when the
+// records are simply not there, as msg says, and at Warn when they may be
+// there and could not be used, so that a refusal for want of validation or
+// a resolver that cannot reach the zone is seen without debug logging.
+func logLookup(msg, identity string, l DiscoveryLookup) {
+	if l.Failure == FailureNoRecords {
+		lgTransport().Debug(msg, "identity", identity, "lookup", l.String())
+		return
+	}
+	lgTransport().Warn("discovery lookup gave nothing to use", "identity", identity, "lookup", l.String(), "failure", l.Failure.String())
 }
 
 // discoverAgentAPI performs DNS-based discovery of a peer's API transport.
@@ -61,18 +128,20 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 	}
 	identity = dns.Fqdn(identity)
 
-	apiUri, apiHost, apiPort, err := imr.lookupAgentAPIEndpoint(ctx, identity)
+	apiUri, apiHost, apiPort, l, err := imr.lookupAgentAPIEndpoint(ctx, identity)
+	result.saw("API", l)
 	if err == nil {
 		result.APIUri = apiUri
 		result.Port = apiPort
 
 		// Look up SVCB at api.<identity> to get IP addresses
 		apiServiceName := "api." + identity
-		addresses, err := imr.lookupServiceAddresses(ctx, apiServiceName)
+		addresses, l, err := imr.lookupServiceAddresses(ctx, apiServiceName)
+		result.saw("API", l)
 		if err == nil {
 			result.APIAddresses = addresses
 		} else {
-			lgTransport().Debug("no SVCB record for API service", "service", apiServiceName, "err", err)
+			logLookup("no SVCB record for API service", identity, l)
 			result.Partial = true
 		}
 
@@ -84,16 +153,24 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 		ans, err := imr.lookupTLSA(ctx, result.TLSA.Owner, false)
 		switch {
 		case err != nil:
-			lgTransport().Debug("TLSA lookup for API service failed", "owner", result.TLSA.Owner, "err", err)
+			l := failedTLSALookup(result.TLSA.Owner, err)
+			result.saw("API", l)
+			logLookup("TLSA lookup for API service failed", identity, l)
 			result.TLSAFailed = true
 			result.Partial = true
 		case !ans.Validated && imr.RequireDnssecValidation:
-			// Vouches for nothing: refused, as a failed lookup would be.
+			// Vouches for nothing, and nor does the set held from before:
+			// that was validated when it was looked up, and has expired
+			// since. Registered as an empty set, so the one held is dropped,
+			// as the TLSA checker drops it; the mechanism is refused
+			// (DiscoveryResult.refused).
+			l := ans.lookup(result.TLSA.Owner, true)
+			result.saw("API", l)
 			lgTransport().Warn("TLSA for API service not DNSSEC-validated and require-dnssec-validation is set; not used",
-				"owner", result.TLSA.Owner)
-			result.TLSAFailed = true
+				"owner", result.TLSA.Owner, "lookup", l.String())
 			result.Partial = true
 		default:
+			result.saw("API", ans.lookup(result.TLSA.Owner, imr.RequireDnssecValidation))
 			result.TLSA.Records = ans.Records
 			result.TLSA.Validated = ans.Validated
 			if len(ans.Records) == 0 {
@@ -104,7 +181,7 @@ func (imr *Imr) discoverAgentAPI(ctx context.Context, identity string, result *D
 
 		lgTransport().Info("found API endpoint", "uri", apiUri, "host", apiHost)
 	} else {
-		lgTransport().Debug("no API URI record found", "err", err)
+		logLookup("no API URI record found", identity, l)
 		result.Partial = true
 	}
 }
@@ -122,44 +199,48 @@ func (imr *Imr) discoverAgentDNS(ctx context.Context, identity string, result *D
 	}
 	identity = dns.Fqdn(identity)
 
-	dnsUri, dnsHost, dnsPort, err := imr.lookupAgentDNSEndpoint(ctx, identity)
+	dnsUri, dnsHost, dnsPort, l, err := imr.lookupAgentDNSEndpoint(ctx, identity)
+	result.saw("DNS", l)
 	if err == nil {
 		result.DNSUri = dnsUri
 
 		// Look up SVCB at dns.<identity> to get IP addresses
 		dnsServiceName := "dns." + identity
-		addresses, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
+		addresses, l, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
+		result.saw("DNS", l)
 		if err == nil {
 			result.DNSAddresses = addresses
 		} else {
-			lgTransport().Warn("SVCB lookup failed for DNS service", "service", dnsServiceName, "err", err)
+			lgTransport().Warn("SVCB lookup failed for DNS service", "service", dnsServiceName, "lookup", l.String())
 			result.Partial = true
 		}
 
 		// Look up JWK at dns.<identity> for the peer's public key
-		jwkData, publicKey, algorithm, err := imr.lookupAgentJWK(ctx, identity)
+		jwkData, publicKey, algorithm, l, err := imr.lookupAgentJWK(ctx, identity)
+		result.saw("DNS", l)
 		if err == nil {
 			result.JWKData = jwkData
 			result.PublicKey = publicKey
 			result.KeyAlgorithm = algorithm
 			lgTransport().Info("found JWK record", "identity", identity, "algorithm", algorithm)
 		} else {
-			lgTransport().Warn("JWK lookup failed", "identity", identity, "err", err)
+			lgTransport().Warn("JWK lookup failed", "identity", identity, "lookup", l.String())
 
 			// Fallback to KEY record for legacy support
-			keyRR, err := imr.lookupAgentKEY(ctx, identity)
+			keyRR, l, err := imr.lookupAgentKEY(ctx, identity)
+			result.saw("DNS", l)
 			if err == nil {
 				result.LegacyKeyRR = keyRR
 				lgTransport().Info("using legacy KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
 			} else {
-				lgTransport().Warn("KEY lookup failed (legacy fallback)", "identity", identity, "err", err)
+				lgTransport().Warn("KEY lookup failed (legacy fallback)", "identity", identity, "lookup", l.String())
 				result.Partial = true
 			}
 		}
 
 		lgTransport().Info("found DNS endpoint", "uri", dnsUri, "host", dnsHost, "port", dnsPort)
 	} else {
-		lgTransport().Debug("no DNS URI record found (optional)", "err", err)
+		logLookup("no DNS URI record found (optional)", identity, l)
 	}
 }
 
@@ -184,9 +265,20 @@ func (imr *Imr) discoverAgent(ctx context.Context, identity string, apiSupported
 		imr.discoverAgentDNS(ctx, identity, result)
 	}
 
-	// Check if we have enough information to contact the peer
+	// Check if we have enough information to contact the peer. When not,
+	// the error says why, from the URI lookup that tells the most: a URI
+	// refused for want of validation is served and signed, and must not
+	// read as missing.
 	if result.APIUri == "" && result.DNSUri == "" {
-		result.Error = fmt.Errorf("no contact endpoints found (no API or DNS URI records)")
+		de := &DiscoveryError{Identity: identity, Lookup: DiscoveryLookup{Type: "URI", Owner: dns.Fqdn(identity),
+			Failure: FailureNoRecords, Detail: "no API or DNS URI records"}}
+		best := -1
+		for _, l := range result.Lookups {
+			if l.Type == "URI" && l.Failure.rank() > best {
+				de.Lookup, best = l, l.Failure.rank()
+			}
+		}
+		result.Error = de
 		return result
 	}
 
@@ -199,16 +291,34 @@ func (imr *Imr) discoverAgent(ctx context.Context, identity string, apiSupported
 // verification keys (SecureWrapper), ContactInfo, and the guarded
 // NEEDED→KNOWN promotions. Fires tm.OnPeerDiscovered(peer) on success, so
 // the application can materialize its own view of the peer.
-func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) error {
+func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err error) {
 	if result.Error != nil {
 		return fmt.Errorf("cannot register peer with discovery error: %w", result.Error)
 	}
 
 	// The top-level peer State is promoted to KNOWN further down, but ONLY
-	// for a mechanism that actually became usable (URI + resolved address).
+	// for a mechanism that actually became usable (URI + resolved address);
+	// from ERROR too, which a failed discovery before this one leaves (the
+	// application's OnDiscoveryFailed), and which EffectiveState shows once
+	// no mechanism is active.
 	// Setting it unconditionally made EffectiveState() report KNOWN for an
 	// unreachable peer — the KNOWN/NEEDED contradiction (Fix C).
 	peer := tm.PeerRegistry.GetOrCreate(result.Identity)
+	st := result.status(time.Now())
+	peer.setDiscoveryStatus(st)
+	// A registration that fails further down is a discovery that gave
+	// nothing to use: the status says why, and the refresh asks again.
+	defer func() {
+		if err != nil && st.Failure == FailureNone {
+			st.Failure, st.Reason = FailureNoRecords, err.Error()
+			peer.setDiscoveryStatus(st)
+		}
+	}()
+	// Before any return: a mechanism refused for want of validation is not
+	// used any more, also when the registration fails further down. A
+	// refused mechanism is never usable (DiscoveryResult.refused), so no
+	// promotion below undoes this.
+	tm.demoteRefused(peer, result)
 
 	// Register API transport address
 	// Register the JWK public key (preferred) with the payload crypto
@@ -239,7 +349,10 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// unusable for encrypted communication. API-only discovery has no such
 	// requirement. Checked here, before any peer field is written, so a
 	// failed registration leaves the peer as it was.
-	dnsUsable := result.DNSUri != "" && len(result.DNSAddresses) > 0
+	// A mechanism whose data was refused for want of DNSSEC validation is
+	// not usable, whatever it held before (DiscoveryResult.refused).
+	_, dnsRefused := result.refused("DNS")
+	dnsUsable := !dnsRefused && result.DNSUri != "" && len(result.DNSAddresses) > 0
 	if dnsUsable && tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
 		hasVerificationKey := false
 		if pc := tm.DNSTransport.SecureWrapper.GetCrypto(); pc != nil {
@@ -357,7 +470,8 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 	// one the API mechanism is not usable, and HTTPS is not attempted.
 	// The set held must be for the name discovery found: one for another
 	// name vouches for nothing at this endpoint.
-	apiUsable := result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
+	_, apiRefused := result.refused("API")
+	apiUsable := !apiRefused && result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
 		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
 		peer.SetMechanismContactInfo("API", "complete")
@@ -366,7 +480,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if raw, ok := peer.MechanismRawState("API"); !ok || raw <= PeerStateNeeded {
 			peer.SetMechanismState("API", PeerStateKnown, "discovered via DNS (API usable)")
 		}
-		if peer.GetState() < PeerStateKnown {
+		if st := peer.GetState(); st < PeerStateKnown || st == PeerStateError {
 			peer.SetState(PeerStateKnown, "discovered via DNS (API usable)")
 		}
 	} else if result.APIUri != "" {
@@ -374,7 +488,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		// mechanism NEEDED so the retrier revisits it; do not advertise an
 		// unusable URL; never regress an already-established peer.
 		peer.SetMechanismContactInfo("API", "partial")
-		if tlsaGone {
+		if tlsaGone && !apiRefused {
 			// The TLSA it was used with is gone: the mechanism needs
 			// discovery again, which finds a TLSA when one is published.
 			peer.SetMechanismState("API", PeerStateNeeded, "TLSA withdrawn")
@@ -398,7 +512,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) erro
 		if raw, ok := peer.MechanismRawState("DNS"); !ok || raw <= PeerStateNeeded {
 			peer.SetMechanismState("DNS", PeerStateKnown, "discovered via DNS (DNS usable)")
 		}
-		if peer.GetState() < PeerStateKnown {
+		if st := peer.GetState(); st < PeerStateKnown || st == PeerStateError {
 			peer.SetState(PeerStateKnown, "discovered via DNS (DNS usable)")
 		}
 		// JWK only when discovered (a partial re-discovery must not wipe a
@@ -444,6 +558,12 @@ func (tm *TransportManager) DiscoverAndRegisterPeer(ctx context.Context, identit
 	// Fix E: only discover transports the local side supports.
 	result := imr.discoverAgent(ctx, identity, tm.isTransportSupported("api"), tm.isTransportSupported("dns"))
 	if result.Error != nil {
+		// Nothing to register, but the peer's status says why, and a
+		// mechanism refused for want of validation is not used any more.
+		if peer, ok := tm.PeerRegistry.Get(identity); ok {
+			peer.setDiscoveryStatus(result.status(time.Now()))
+			tm.demoteRefused(peer, result)
+		}
 		return fmt.Errorf("discovery failed for %s: %w", identity, result.Error)
 	}
 	if result.Partial {
@@ -456,4 +576,20 @@ func (tm *TransportManager) DiscoverAndRegisterPeer(ctx context.Context, identit
 
 	lgTransport().Info("successfully discovered and registered peer", "identity", identity)
 	return nil
+}
+
+// demoteRefused makes NEEDED each mechanism of peer whose data the result
+// refused for want of DNSSEC validation (DiscoveryResult.refused): it needs
+// discovery again, and stays NEEDED until its chain validates.
+func (tm *TransportManager) demoteRefused(peer *Peer, result *DiscoveryResult) {
+	for _, mech := range []string{"API", "DNS"} {
+		l, refused := result.refused(mech)
+		if !refused {
+			continue
+		}
+		if was, demoted := peer.demoteMechanism(mech, l.String()); demoted {
+			lgTransport().Warn("the peer's DNS data is not DNSSEC-validated any more; the mechanism needs discovery again",
+				"peer", peer.ID, "mechanism", mech, "was", was.String(), "lookup", l.String())
+		}
+	}
 }

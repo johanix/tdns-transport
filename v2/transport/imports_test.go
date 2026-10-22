@@ -23,6 +23,7 @@ var allowedJohanixImports = map[string]bool{
 	"github.com/johanix/tdns-transport/v2/crypto":  true,
 	"github.com/johanix/tdns-transport/v2/distrib": true,
 	"github.com/johanix/tdns/v2":                   true, // imr.go: the resolver engine and Globals
+	"github.com/johanix/tdns/v2/cache":             true, // discovery_status.go: the resolver's DNSSEC verdicts (tdns-mp #260)
 	"github.com/johanix/tdns/v2/core":              true, // the CHUNK RR and message constants
 	"github.com/johanix/tdns/v2/edns0":             true, // the CHUNK option
 }

@@ -73,6 +73,14 @@ resolves an identity's URI, SVCB, TLSA and JWK records through the tdns
 resolver and installs what it finds on the peer and in PayloadCrypto. The
 application decides when to discover; transport does the lookups.
 
+Each lookup's DNSSEC verdict and cache expiry go on the peer's
+DiscoveryStatus (discovery_status.go), with the reason when discovery gave
+nothing to use: a refusal for want of validation is told apart from records
+that are not there. A mechanism whose data stops validating goes back to
+NEEDED. StartDiscoveryRefresh, when the application starts it, looks a peer
+up again when what discovery read for it expires from the cache
+(discovery_refresh.go).
+
 # Consumers
 
 The multi-provider application in tdns-mp is the production consumer.
