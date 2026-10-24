@@ -76,6 +76,60 @@ func TestSendBothFailCarriesBoth(t *testing.T) {
 	}
 }
 
+// refuseTransport's SendApp returns a ConfirmFailed AppResponse with no
+// error: what a peer answers when it refuses an RFI (or sync/update).
+type refuseTransport struct {
+	sendTransport
+	status ConfirmStatus
+	msg    string
+}
+
+func (f *refuseTransport) SendApp(context.Context, *Peer, *AppMessage) (*AppResponse, error) {
+	f.calls++
+	st := f.status
+	if st == 0 {
+		st = ConfirmFailed
+	}
+	return &AppResponse{Status: st, Message: f.msg}, nil
+}
+
+// A recipient's refusal of a sync-family verb must not fall back: the
+// message was delivered and judged; the other mechanism would refuse
+// again (tdns-transport #36).
+func TestSendRefusalDoesNotFallBack(t *testing.T) {
+	ctx := context.Background()
+	peer := NewPeer("peer.example.")
+	primary := &refuseTransport{sendTransport: sendTransport{name: "API"}, msg: "not authorized"}
+	fallback := &sendTransport{name: "DNS"}
+
+	resp, err := sendWith(ctx, peer, &AppMessage{TypeToken: "rfi"}, primary, fallback)
+	if fallback.calls != 0 {
+		t.Fatalf("fallback was called %d times; a refusal must not fall back", fallback.calls)
+	}
+	if primary.calls != 1 {
+		t.Fatalf("primary calls %d, want 1", primary.calls)
+	}
+	var te *TransportError
+	if !errors.As(err, &te) || !te.Retryable || !te.Answered {
+		t.Fatalf("err %v: want a retryable Answered *TransportError", err)
+	}
+	if ar, ok := resp.(*AppResponse); !ok || ar.Status != ConfirmFailed {
+		t.Fatalf("resp %+v, want the ConfirmFailed AppResponse", resp)
+	}
+	if !strings.Contains(err.Error(), "not authorized") {
+		t.Errorf("error %q does not carry the refusal", err)
+	}
+
+	// A dial-style retryable failure still falls back.
+	dialErr := NewTransportError("API", "rfi", peer.ID, errors.New("connection refused"), true)
+	dnsOK := &sendTransport{name: "DNS"}
+	apiFail := &sendTransport{name: "API", err: dialErr}
+	resp, err = sendWith(ctx, peer, &AppMessage{TypeToken: "rfi"}, apiFail, dnsOK)
+	if err != nil || dnsOK.calls != 1 {
+		t.Fatalf("dial failure should fall back: resp %+v err %v fallback calls %d", resp, err, dnsOK.calls)
+	}
+}
+
 // TestSendFallbackOutcomes covers the other ways out of primary-then-fallback.
 func TestSendFallbackOutcomes(t *testing.T) {
 	ctx := context.Background()

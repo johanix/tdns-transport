@@ -418,12 +418,14 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 				return nil, err
 			}
 			// A non-ok confirmation of a zone-data verb is an
-			// application-level rejection; report it as a retryable
-			// error so the caller's queue retries (the pre-C2
-			// DNSTransport.Sync contract).
+			// application-level rejection: delivered and judged.
+			// Report it as retryable for the caller's queue (the
+			// pre-C2 DNSTransport.Sync contract), but Answered so
+			// the other mechanism is not tried — it would refuse
+			// again for the same reason (tdns-transport #36).
 			if resp.Status == ConfirmFailed && isSyncFamily(r.TypeToken) {
-				return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID,
-					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message), true)
+				return resp, NewAnsweredTransportError(t.Name(), r.TypeToken, peer.ID,
+					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message))
 			}
 			return resp, nil
 		}
@@ -470,11 +472,22 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 	// turns a clear error into a confusing one. Errors not wrapped
 	// in *TransportError are treated as fall-back-eligible (safe
 	// default for unaudited code paths).
+	//
+	// Don't fall back on an Answered refusal either: the recipient
+	// already judged the message. Confirm's "recipient refused" is
+	// not Answered — that path still covers a peer whose /msg does
+	// not take confirmations yet, and DNS must carry them
+	// (tdns-transport #36; TestManagerConfirmPrefersAPIFallsBackToDNS).
 	var te *TransportError
-	if errors.As(primaryErr, &te) && !te.Retryable {
-		slog.Debug("primary transport failed with non-retryable error, not falling back",
-			"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
-		return nil, primaryErr
+	if errors.As(primaryErr, &te) && (!te.Retryable || te.Answered) {
+		if te.Answered {
+			slog.Debug("primary transport answered with a refusal, not falling back",
+				"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
+		} else {
+			slog.Debug("primary transport failed with non-retryable error, not falling back",
+				"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
+		}
+		return resp, primaryErr
 	}
 	if fallback == nil {
 		return nil, fmt.Errorf("Send: all transports failed for peer %s (%s: %w)",

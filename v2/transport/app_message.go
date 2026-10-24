@@ -85,12 +85,14 @@ type AppResponse struct {
 	Truncated      bool
 }
 
-// isSyncFamily reports whether a verb is one of the zone-data verbs whose
-// application-level rejection the sender treats as a retryable failure
-// (the pre-C2 DNSTransport.Sync contract).
+// isSyncFamily reports whether a verb is one of the zone-data verbs the
+// HTTPS /msg endpoint carries, and whose application-level rejection the
+// sender treats as a retryable (Answered) failure — the pre-C2
+// DNSTransport.Sync contract. config and audit are the answers to RFI
+// CONFIG/AUDIT; they travel the same path as the request (tdns-mp #238).
 func isSyncFamily(token string) bool {
 	switch token {
-	case "sync", "update", "rfi":
+	case "sync", "update", "rfi", "config", "audit":
 		return true
 	}
 	return false
@@ -179,10 +181,8 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 }
 
 // SendApp over the API mechanism. Only the sync family has an API
-// endpoint (/sync); the body is re-derived from the application payload
-// into the pre-C2 apiSyncRequest shape. sync_type and serial are not
-// part of the application payload and are sent as their zero values.
-// Every other verb is DNS-only, as before C2.
+// endpoint (/msg): sync, update, rfi, and the config/audit answers to
+// RFI. Every other verb is DNS-only, as before C2.
 func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage) (*AppResponse, error) {
 	if msg == nil || msg.TypeToken == "" {
 		return nil, NewTransportError("API", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)
