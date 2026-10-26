@@ -481,8 +481,9 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 		// API's address there, once the API mechanism is usable. One that
 		// offers DNS does not: with its DNS refused or unresolved, the DNS
 		// carrier would send to the HTTPS endpoint, and API is the way to
-		// reach it.
-		if result.DNSUri == "" && peer.MechanismAddress(MechanismDNS) == nil {
+		// reach it. A refused DNS URI comes as no URI, so the refusal is
+		// asked too.
+		if !dnsRefused && result.DNSUri == "" && peer.MechanismAddress(MechanismDNS) == nil {
 			peer.SetDiscoveryAddress(peer.MechanismAddress(MechanismAPI))
 		}
 		peer.SetMechanismContactInfo("API", "complete")

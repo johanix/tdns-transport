@@ -748,8 +748,24 @@ func TestAnUnusableAPIIsNoAddressForTheDNSCarrier(t *testing.T) {
 
 // DNS refused, API usable, and a peer that prefers DNS: SelectTransport
 // takes API. The API's address is not put where the DNS carrier dials it,
-// as the peer offers DNS (CodeRabbit on #39 at a84ac32).
+// as the peer offers DNS (CodeRabbit on #39 at a84ac32). The DNS URI itself
+// refused comes as no URI, and is a refusal all the same (review of #39 at
+// 4145d37).
 func TestRefusedDNSWithAUsableAPISelectsAPI(t *testing.T) {
+	t.Run("key lookup refused", func(t *testing.T) {
+		refusedDNSWithUsableAPI(t, "dns://dns.agent.example.:53", []string{"192.0.2.20"},
+			DiscoveryLookup{Mechanism: "DNS", Type: "JWK", Owner: dnssecPeer, Chain: ChainInsecure,
+				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"})
+	})
+	t.Run("URI refused", func(t *testing.T) {
+		refusedDNSWithUsableAPI(t, "", nil,
+			DiscoveryLookup{Mechanism: "DNS", Type: "URI", Owner: "_dns._tcp." + dnssecPeer, Chain: ChainInsecure,
+				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"})
+	})
+}
+
+func refusedDNSWithUsableAPI(t *testing.T, dnsURI string, dnsAddrs []string, refusal DiscoveryLookup) {
+	t.Helper()
 	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
 	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
 	tlsa, err := dns.NewRR("_8443._tcp.api." + dnssecPeer + " 600 IN TLSA 3 1 1 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -761,12 +777,9 @@ func TestRefusedDNSWithAUsableAPISelectsAPI(t *testing.T) {
 		APIUri:       "https://api.agent.example.:8443/api",
 		APIAddresses: []string{"192.0.2.10"},
 		TLSA:         TLSASet{Owner: "_8443._tcp.api." + dnssecPeer, Records: []*dns.TLSA{tlsa.(*dns.TLSA)}, Validated: true},
-		DNSUri:       "dns://dns.agent.example.:53",
-		DNSAddresses: []string{"192.0.2.20"},
-		Lookups: []DiscoveryLookup{
-			{Mechanism: "DNS", Type: "JWK", Owner: dnssecPeer, Chain: ChainInsecure,
-				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"},
-		},
+		DNSUri:       dnsURI,
+		DNSAddresses: dnsAddrs,
+		Lookups:      []DiscoveryLookup{refusal},
 	})
 	if err != nil {
 		t.Fatalf("registration: %v", err)
