@@ -130,6 +130,63 @@ func TestSendRefusalDoesNotFallBack(t *testing.T) {
 	}
 }
 
+// A /msg that does not take a verb answers that it is not accepted there
+// (tdns-mp's main takes sync, update, rfi and confirm; config and audit
+// come with tdns-mp #238). Nothing judged the message, so Send carries it
+// over DNS, for every sync-family verb. A message the endpoint took and
+// judged does not fall back: the refusal comes back, Answered
+// (tdns-transport #36).
+func TestSendVerbNotAcceptedFallsBack(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rcv := newMsgReceiver(t)
+	dnsRcv := newDNSChunkReceiver(t)
+	dnsRcv.setConfirm(true)
+	tm := &TransportManager{
+		APITransport: apiClient(&APITransportConfig{LocalID: "a.example.", DefaultTimeout: 2 * time.Second}, rcv.srv),
+		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
+	}
+	peer := apiPeer(rcv.srv)
+	peer.SetDiscoveryAddress(dnsRcv.addr)
+	peer.SetMechanismAddress("DNS", dnsRcv.addr)
+
+	posts, notifies := 0, 0
+	for _, verb := range []string{"sync", "update", "rfi", "config", "audit"} {
+		rcv.refuseWith(fmt.Sprintf("message type %q is not accepted on /api/v1/msg", verb))
+		resp, err := tm.Send(ctx, peer, &AppMessage{TypeToken: verb, Payload: []byte(`{}`)})
+		posts++
+		notifies++
+		if err != nil {
+			t.Fatalf("%s not accepted on /msg: %v, want it sent over DNS", verb, err)
+		}
+		if ar, ok := resp.(*AppResponse); !ok || ar.Status != ConfirmSuccess {
+			t.Errorf("%s not accepted on /msg: resp %+v, want DNS's ConfirmSuccess", verb, resp)
+		}
+		if api, dns := len(rcv.captured()), len(dnsRcv.received()); api != posts || dns != notifies {
+			t.Fatalf("%s not accepted on /msg: %d POSTs, %d NOTIFYs; want %d and %d", verb, api, dns, posts, notifies)
+		}
+	}
+
+	// A config the endpoint took and judged stays there.
+	rcv.refuseWith("not authorized")
+	resp, err := tm.Send(ctx, peer, &AppMessage{TypeToken: "config", Payload: []byte(`{}`)})
+	posts++
+	var te *TransportError
+	if err == nil || !errors.As(err, &te) || !te.Retryable || !te.Answered {
+		t.Fatalf("a judged config: %v, want a retryable, Answered *TransportError", err)
+	}
+	if !strings.Contains(err.Error(), "not authorized") {
+		t.Errorf("error %q does not carry the refusal", err)
+	}
+	if ar, ok := resp.(*AppResponse); !ok || ar.Status != ConfirmFailed {
+		t.Errorf("a judged config: resp %+v, want the ConfirmFailed AppResponse", resp)
+	}
+	if api, dns := len(rcv.captured()), len(dnsRcv.received()); api != posts || dns != notifies {
+		t.Fatalf("a judged config: %d POSTs, %d NOTIFYs; want %d and %d", api, dns, posts, notifies)
+	}
+}
+
 // TestSendFallbackOutcomes covers the other ways out of primary-then-fallback.
 func TestSendFallbackOutcomes(t *testing.T) {
 	ctx := context.Background()

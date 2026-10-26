@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
@@ -87,8 +88,10 @@ type AppResponse struct {
 
 // isSyncFamily reports whether a verb is one of the zone-data verbs the
 // HTTPS /msg endpoint carries, and whose application-level rejection the
-// sender treats as a retryable (Answered) failure — the pre-C2
-// DNSTransport.Sync contract. config and audit are the answers to RFI
+// sender treats as a retryable failure — the pre-C2 DNSTransport.Sync
+// contract. The failure is Answered (no fallback) when the peer judged
+// the message, and fall-back-eligible when the endpoint does not take the
+// verb (verbNotAccepted). config and audit are the answers to RFI
 // CONFIG/AUDIT; they travel the same path as the request (tdns-mp #238).
 func isSyncFamily(token string) bool {
 	switch token {
@@ -96,6 +99,19 @@ func isSyncFamily(token string) bool {
 		return true
 	}
 	return false
+}
+
+// verbNotAccepted reports whether a peer's refusal is the HTTPS endpoint's
+// capability reply, `message type "config" is not accepted on
+// /api/v1/msg`: the endpoint does not take the verb, so nothing judged
+// the message and the other mechanism may carry it. Every other refusal
+// is the peer's judgment of a message the endpoint took (the sender, the
+// client certificate or the handler refused it); the other mechanism
+// would get the same answer, so the refusal is Answered (tdns-transport
+// #36). Both the sync-family send path (sendWith) and
+// APITransport.Confirm decide on this, so the two cannot drift.
+func verbNotAccepted(reply string) bool {
+	return strings.Contains(reply, " is not accepted on ")
 }
 
 // SendApp sends one opaque application message as a NOTIFY(CHUNK) and
@@ -182,7 +198,9 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qn
 
 // SendApp over the API mechanism. Only the sync family has an API
 // endpoint (/msg): sync, update, rfi, and the config/audit answers to
-// RFI. Every other verb is DNS-only, as before C2.
+// RFI. Every other verb is DNS-only, as before C2. A receiver whose /msg
+// does not take a verb (config and audit, before tdns-mp #238) answers
+// that it is not accepted there, and the manager sends it over DNS.
 func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage) (*AppResponse, error) {
 	if msg == nil || msg.TypeToken == "" {
 		return nil, NewTransportError("API", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)

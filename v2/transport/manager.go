@@ -353,8 +353,9 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 // transport SelectTransport picks (the API when the peer offers it), then
 // on the other one when that fails. A receiver that does not take
 // confirmations over HTTPS refuses the API's, and the DNS NOTIFY carries
-// it instead. When the other one can reach the peer, the first try gets
-// half of ctx's time.
+// it instead. A receiver that takes it and refuses it has judged it: that
+// refusal is returned, Answered, and DNS is not tried. When the other one
+// can reach the peer, the first try gets half of ctx's time.
 //
 // A try that times out after the receiver took the confirmation sends it
 // again on the other mechanism, and the receiver gets it twice, as it
@@ -418,14 +419,19 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 				return nil, err
 			}
 			// A non-ok confirmation of a zone-data verb is an
-			// application-level rejection: delivered and judged.
-			// Report it as retryable for the caller's queue (the
-			// pre-C2 DNSTransport.Sync contract), but Answered so
-			// the other mechanism is not tried — it would refuse
-			// again for the same reason (tdns-transport #36).
+			// application-level rejection, retryable for the caller's
+			// queue (the pre-C2 DNSTransport.Sync contract). When the
+			// endpoint does not take the verb, nothing judged the
+			// message, and the other mechanism may carry it. Any
+			// other refusal is the peer's judgment: Answered, so the
+			// other mechanism is not tried — it would refuse again
+			// for the same reason (tdns-transport #36).
 			if resp.Status == ConfirmFailed && isSyncFamily(r.TypeToken) {
-				return resp, NewAnsweredTransportError(t.Name(), r.TypeToken, peer.ID,
-					fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message))
+				err := fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message)
+				if verbNotAccepted(resp.Message) {
+					return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID, err, true)
+				}
+				return resp, NewAnsweredTransportError(t.Name(), r.TypeToken, peer.ID, err)
 			}
 			return resp, nil
 		}
@@ -474,10 +480,12 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 	// default for unaudited code paths).
 	//
 	// Don't fall back on an Answered refusal either: the recipient
-	// already judged the message. Confirm's "recipient refused" is
-	// not Answered — that path still covers a peer whose /msg does
-	// not take confirmations yet, and DNS must carry them
-	// (tdns-transport #36; TestManagerConfirmPrefersAPIFallsBackToDNS).
+	// already judged the message. A reply that the endpoint does not
+	// take the verb (verbNotAccepted) is not Answered, for a message or
+	// a confirmation alike: a peer whose /msg does not take it yet gets
+	// it over DNS (tdns-transport #36;
+	// TestManagerConfirmPrefersAPIFallsBackToDNS,
+	// TestSendVerbNotAcceptedFallsBack).
 	var te *TransportError
 	if errors.As(primaryErr, &te) && (!te.Retryable || te.Answered) {
 		if te.Answered {
