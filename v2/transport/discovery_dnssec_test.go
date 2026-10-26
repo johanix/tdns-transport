@@ -573,3 +573,80 @@ func TestARefusedMechanismIsDemotedWhenTheRegistrationFails(t *testing.T) {
 		t.Errorf("status failure %v reason %q: want the registration's failure", s.Failure, s.Reason)
 	}
 }
+
+// The refresh at expiry finds the chain broken: the mechanism it refuses
+// can be selected no longer. Its endpoint and address are gone, not only its
+// state, so no send path (SelectTransport, which reads no state) reaches the
+// peer on the data it held (CodeRabbit on tdns-mp #263).
+func TestARefusedMechanismCannotBeSelected(t *testing.T) {
+	imr := cachedPeerImr(t, true, cache.ValidationStateSecure, 600)
+	tm, peer := apiManager(imr)
+	tm.APITransport = &APITransport{}
+	if err := discoverWithin(t, tm); err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	peer.SetMechanismState("API", PeerStateOperational, "hello")
+	if !peer.APIUsable() || tm.SelectTransport(peer) == nil {
+		t.Fatal("after a secure discovery the API mechanism is not usable")
+	}
+
+	cacheAnswer(t, imr.Imr, "_https._tcp."+dnssecPeer+" IN URI 10 1 \"https://api.agent.example.:8443/api\"", cache.ValidationStateInsecure, 600)
+	expired := peer.DiscoveryStatus().Expires.Add(time.Second)
+	if n := tm.refreshExpiredDiscoveries(context.Background(), expired); n != 1 {
+		t.Fatalf("refreshed %d peers after expiry, want 1", n)
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateNeeded {
+		t.Errorf("API state %v, want NEEDED", st)
+	}
+	if ep := peer.GetAPIEndpoint(); ep != "" {
+		t.Errorf("API endpoint %q kept after the refusal", ep)
+	}
+	if a := peer.MechanismAddress("API"); a != nil {
+		t.Errorf("API address %+v kept after the refusal", a)
+	}
+	if peer.APIUsable() || peer.HasMechanism("API") {
+		t.Error("the refused API mechanism is still usable")
+	}
+	if tr := tm.SelectTransport(peer); tr != nil {
+		t.Errorf("SelectTransport chose %s for a peer whose only mechanism was refused", tr.Name())
+	}
+}
+
+// Refusing DNS takes the address the DNS carrier dials (CurrentAddress:
+// the relocated one, then the discovered one) and the mechanism's own; API's
+// endpoint and address stay. Refusing API takes its endpoint and address.
+func TestDemotingAMechanismDropsOnlyItsAddresses(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
+	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+	apiAddr := &Address{Host: "192.0.2.10", Port: 8443, Transport: "https"}
+	dnsAddr := &Address{Host: "192.0.2.20", Port: 53, Transport: "udp"}
+	peer.SetDiscoveryAddress(dnsAddr)
+	peer.SetOperationalAddress(&Address{Host: "198.51.100.20", Port: 53, Transport: "udp"})
+	peer.SetMechanismAddress("API", apiAddr)
+	peer.SetMechanismAddress("DNS", dnsAddr)
+	peer.SetAPIEndpoint("https://api.agent.example.:8443/api")
+	peer.SetMechanismState("API", PeerStateOperational, "hello")
+	peer.SetMechanismState("DNS", PeerStateOperational, "hello")
+
+	peer.demoteMechanism("DNS", "SVCB at dns.agent.example.: answer insecure")
+	if a := peer.CurrentAddress(); a != nil {
+		t.Errorf("CurrentAddress %+v after DNS was refused, want none", a)
+	}
+	if peer.HasMechanism("DNS") {
+		t.Error("the refused DNS mechanism is still there")
+	}
+	if peer.GetAPIEndpoint() == "" || peer.MechanismAddress("API") != apiAddr {
+		t.Error("refusing DNS took API's endpoint or address")
+	}
+	if st, _ := peer.MechanismRawState("API"); st != PeerStateOperational {
+		t.Errorf("API state %v after DNS was refused, want OPERATIONAL", st)
+	}
+
+	peer.demoteMechanism("API", "URI at _https._tcp.agent.example.: answer insecure")
+	if peer.GetAPIEndpoint() != "" || peer.MechanismAddress("API") != nil || peer.HasMechanism("API") {
+		t.Error("the refused API mechanism keeps its endpoint or address")
+	}
+	if tr := tm.SelectTransport(peer); tr != nil {
+		t.Errorf("SelectTransport chose %s with both mechanisms refused", tr.Name())
+	}
+}

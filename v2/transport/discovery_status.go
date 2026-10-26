@@ -369,12 +369,16 @@ func (p *Peer) noteLookup(l DiscoveryLookup) {
 }
 
 // demoteMechanism makes the mechanism NEEDED for reason, with its contact
-// information partial: what it was used with can be used no longer. It
-// returns the state it had and whether it was past NEEDED; a mechanism that
-// was not keeps its state and gets the reason. When no mechanism is left
-// past NEEDED, the peer's own state follows, from any state: EffectiveState
-// falls back to it then, and an ERROR left from a failed discovery before
-// the peer was found would be shown in its place.
+// information partial: what it was used with can be used no longer. The
+// address and endpoint it held go, so that no send path selects it
+// (SelectTransport, HasMechanism, APIUsable) until discovery finds data
+// that validates: DNS's address (CurrentAddress, which the DNS carrier
+// dials, and the relocated one) and API's endpoint; the other mechanism's
+// are kept. It returns the state it had and whether it was past NEEDED; a
+// mechanism that was not keeps its state and gets the reason. When no
+// mechanism is left past NEEDED, the peer's own state follows, from any
+// state: EffectiveState falls back to it then, and an ERROR left from a
+// failed discovery before the peer was found would be shown in its place.
 func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -387,6 +391,13 @@ func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 		p.Mechanisms[name] = m
 	}
 	m.ContactInfo = "partial"
+	m.Address = nil
+	switch name {
+	case MechanismAPI:
+		p.APIEndpoint = ""
+	case MechanismDNS:
+		p.DiscoveryAddr, p.OperationalAddr, p.DNSEndpoint = nil, nil, ""
+	}
 	was := m.State
 	pastNeeded := func(s PeerState) bool { return s > PeerStateNeeded && s != PeerStateError }
 	demoted := pastNeeded(was)
