@@ -802,3 +802,35 @@ func refusedDNSWithUsableAPI(t *testing.T, dnsURI string, dnsAddrs []string, ref
 		t.Errorf("SelectTransport chose %s, want API", got)
 	}
 }
+
+// A peer known from config or a hello has the address the DNS carrier
+// dials and no DNS slot. Refusing its API takes the API's endpoint and
+// slot, and leaves that address: DNS was not refused (CodeRabbit on #39 at
+// 5e9b84a). An API-only peer's fallback address goes with its API
+// (TestARefusedMechanismCannotBeSelected).
+func TestRefusingAPIKeepsAConfiguredCarrierAddress(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
+	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+	carrier := &Address{Host: "192.0.2.20", Port: 53, Transport: "udp"}
+	relocated := &Address{Host: "198.51.100.20", Port: 53, Transport: "udp"}
+	peer.SetDiscoveryAddress(carrier)
+	peer.SetOperationalAddress(relocated)
+	peer.SetMechanismAddress("API", &Address{Host: "192.0.2.10", Port: 8443, Transport: "https", Path: "/api"})
+	peer.SetAPIEndpoint("https://api.agent.example.:8443/api")
+	peer.SetMechanismState("API", PeerStateOperational, "hello")
+
+	peer.demoteMechanism("API", "TLSA at _8443._tcp.api.agent.example.: answer insecure")
+	if peer.GetAPIEndpoint() != "" || peer.MechanismAddress("API") != nil {
+		t.Error("the refused API mechanism keeps its endpoint or address")
+	}
+	if a := peer.CurrentAddress(); a != relocated {
+		t.Errorf("CurrentAddress %+v, want the relocated %+v: refusing API took the DNS carrier's", a, relocated)
+	}
+	if tr := tm.SelectTransport(peer); tr == nil || tr.Name() != "DNS" {
+		got := "nothing"
+		if tr != nil {
+			got = tr.Name()
+		}
+		t.Errorf("SelectTransport chose %s, want DNS", got)
+	}
+}
