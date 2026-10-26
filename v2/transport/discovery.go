@@ -394,7 +394,6 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 				Transport: "https",
 				Path:      parsed.Path,
 			}
-			peer.SetDiscoveryAddress(addr)
 			peer.SetMechanismAddress("API", addr)
 			peer.SetAPIEndpoint(result.APIUri)
 			peer.SetPreferredTransport("API")
@@ -476,6 +475,13 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	apiUsable := !apiRefused && result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
 		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
+		// DiscoveryAddr is the slot the DNS carrier dials. A peer with no DNS
+		// address gets API's there, but only once the API mechanism is
+		// usable: before, with DNS refused, say, the DNS carrier would send
+		// to the HTTPS endpoint.
+		if peer.MechanismAddress(MechanismDNS) == nil {
+			peer.SetDiscoveryAddress(peer.MechanismAddress(MechanismAPI))
+		}
 		peer.SetMechanismContactInfo("API", "complete")
 		// Guarded promotion: do not regress an already-established mechanism.
 		// This is the per-mechanism discovery-phase write the send gates read.

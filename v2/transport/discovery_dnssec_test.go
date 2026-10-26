@@ -708,3 +708,40 @@ func TestARegistrationWritesNoRefusedDNSAddressBack(t *testing.T) {
 		t.Errorf("SelectTransport chose %s for the refused DNS mechanism", tr.Name())
 	}
 }
+
+// An API mechanism that is not usable yet (no TLSA) is no address for the
+// DNS carrier: with DNS refused, nothing is selected, where the HTTPS
+// address in DiscoveryAddr had the DNS carrier send to it (CodeRabbit on
+// #39). A usable API mechanism on a peer with no DNS address still puts
+// its address there, as before.
+func TestAnUnusableAPIIsNoAddressForTheDNSCarrier(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
+	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+	err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     dnssecPeer,
+		APIUri:       "https://api.agent.example.:8443/api",
+		APIAddresses: []string{"192.0.2.10"},
+		DNSUri:       "dns://dns.agent.example.:53",
+		DNSAddresses: []string{"192.0.2.20"},
+		Lookups: []DiscoveryLookup{
+			{Mechanism: "DNS", Type: "JWK", Owner: dnssecPeer, Chain: ChainInsecure,
+				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"},
+		},
+	})
+	t.Logf("registration: %v", err)
+	if a := peer.CurrentAddress(); a != nil {
+		t.Errorf("CurrentAddress %+v: the unusable API's address is there for the DNS carrier", a)
+	}
+	if tr := tm.SelectTransport(peer); tr != nil {
+		t.Errorf("SelectTransport chose %s with DNS refused and API not usable", tr.Name())
+	}
+
+	imr := cachedPeerImr(t, true, cache.ValidationStateSecure, 600)
+	tm2, peer2 := apiManager(imr)
+	if err := discoverWithin(t, tm2); err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	if a, api := peer2.CurrentAddress(), peer2.MechanismAddress("API"); a == nil || a != api {
+		t.Errorf("CurrentAddress %+v, want the usable API's address %+v on a peer with no DNS", a, api)
+	}
+}
