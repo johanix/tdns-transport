@@ -372,9 +372,11 @@ func (p *Peer) noteLookup(l DiscoveryLookup) {
 // information partial: what it was used with can be used no longer. The
 // address and endpoint it held go, so that no send path selects it
 // (SelectTransport, HasMechanism, APIUsable) until discovery finds data
-// that validates: DNS's address (CurrentAddress, which the DNS carrier
-// dials, and the relocated one) and API's endpoint; the other mechanism's
-// are kept. It returns the state it had and whether it was past NEEDED; a
+// that validates: its slot, API's endpoint, DNS's display endpoint. The
+// addresses the DNS carrier dials (CurrentAddress: the relocated one, then
+// the discovered one) go too once no DNS address is left: registration
+// writes API's address there as well, and it stays API's on a peer with no
+// DNS mechanism. The other mechanism's are kept. It returns the state it had and whether it was past NEEDED; a
 // mechanism that was not keeps its state and gets the reason. When no
 // mechanism is left past NEEDED, the peer's own state follows, from any
 // state: EffectiveState falls back to it then, and an ERROR left from a
@@ -396,7 +398,10 @@ func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 	case MechanismAPI:
 		p.APIEndpoint = ""
 	case MechanismDNS:
-		p.DiscoveryAddr, p.OperationalAddr, p.DNSEndpoint = nil, nil, ""
+		p.DNSEndpoint = ""
+	}
+	if dns := p.Mechanisms[MechanismDNS]; dns == nil || dns.Address == nil {
+		p.DiscoveryAddr, p.OperationalAddr = nil, nil
 	}
 	was := m.State
 	pastNeeded := func(s PeerState) bool { return s > PeerStateNeeded && s != PeerStateError }

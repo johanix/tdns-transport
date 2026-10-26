@@ -463,6 +463,7 @@ func TestADiscoveryThatRefusesTheTLSADropsIt(t *testing.T) {
 		t.Fatalf("discovery: %v", err)
 	}
 	peer.SetMechanismState("API", PeerStateOperational, "hello")
+	tm.APITransport, tm.DNSTransport = &APITransport{}, &DNSTransport{}
 	cacheAnswer(t, imr.Imr, "_8443._tcp.api."+dnssecPeer+" IN TLSA 3 1 1 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", cache.ValidationStateInsecure, 600)
 	if err := discoverWithin(t, tm); err != nil {
 		t.Fatalf("second discovery: %v", err)
@@ -472,6 +473,14 @@ func TestADiscoveryThatRefusesTheTLSADropsIt(t *testing.T) {
 	}
 	if peer.HasMechanismTLSA("API") {
 		t.Error("the TLSA set held from before was kept")
+	}
+	// The URI and the SVCB validated, the TLSA did not: registration must not
+	// write the refused mechanism's endpoint or address back.
+	if ep, a := peer.GetAPIEndpoint(), peer.CurrentAddress(); ep != "" || a != nil {
+		t.Errorf("endpoint %q, CurrentAddress %+v: written back for the refused mechanism", ep, a)
+	}
+	if tr := tm.SelectTransport(peer); tr != nil {
+		t.Errorf("SelectTransport chose %s after the TLSA was refused", tr.Name())
 	}
 	if r := peer.DiscoveryStatus().MechanismReason("API"); !strings.Contains(r, "TLSA at") || !strings.Contains(r, "DNSSEC validation required") {
 		t.Errorf("reason %q: want the refused TLSA", r)
@@ -556,9 +565,12 @@ func TestARefusedMechanismIsDemotedWhenTheRegistrationFails(t *testing.T) {
 	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
 	p := tm.PeerRegistry.GetOrCreate("b.example.")
 	p.SetMechanismState("API", PeerStateOperational, "hello")
+	// The refused API mechanism's data is not written, so the failure comes
+	// from the other mechanism: an invalid DNS URI.
 	err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
 		Identity: "b.example.",
-		APIUri:   "https://api.b.example.:%zz/api",
+		APIUri:   "https://api.b.example.:8443/api",
+		DNSUri:   "dns://dns.b.example.:%zz",
 		Lookups: []DiscoveryLookup{{Mechanism: "API", Type: "SVCB", Owner: "api.b.example.",
 			Chain: ChainInsecure, Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"}},
 	})
@@ -569,7 +581,7 @@ func TestARefusedMechanismIsDemotedWhenTheRegistrationFails(t *testing.T) {
 		t.Errorf("API state %v, want NEEDED: the refusal is to take it out of use whatever else fails", st)
 	}
 	s := p.DiscoveryStatus()
-	if s.Failure == FailureNone || !strings.Contains(s.Reason, "invalid API URI") {
+	if s.Failure == FailureNone || !strings.Contains(s.Reason, "invalid DNS URI") {
 		t.Errorf("status failure %v reason %q: want the registration's failure", s.Failure, s.Reason)
 	}
 }
@@ -589,6 +601,9 @@ func TestARefusedMechanismCannotBeSelected(t *testing.T) {
 	if !peer.APIUsable() || tm.SelectTransport(peer) == nil {
 		t.Fatal("after a secure discovery the API mechanism is not usable")
 	}
+	// The DNS carrier is there too, as in an agent: an API-only peer's
+	// discovered address, which it dials, must go with the API mechanism.
+	tm.DNSTransport = &DNSTransport{}
 
 	cacheAnswer(t, imr.Imr, "_https._tcp."+dnssecPeer+" IN URI 10 1 \"https://api.agent.example.:8443/api\"", cache.ValidationStateInsecure, 600)
 	expired := peer.DiscoveryStatus().Expires.Add(time.Second)
@@ -606,6 +621,9 @@ func TestARefusedMechanismCannotBeSelected(t *testing.T) {
 	}
 	if peer.APIUsable() || peer.HasMechanism("API") {
 		t.Error("the refused API mechanism is still usable")
+	}
+	if a := peer.CurrentAddress(); a != nil {
+		t.Errorf("CurrentAddress %+v, the refused API address, is still there for the DNS carrier", a)
 	}
 	if tr := tm.SelectTransport(peer); tr != nil {
 		t.Errorf("SelectTransport chose %s for a peer whose only mechanism was refused", tr.Name())
@@ -648,5 +666,45 @@ func TestDemotingAMechanismDropsOnlyItsAddresses(t *testing.T) {
 	}
 	if tr := tm.SelectTransport(peer); tr != nil {
 		t.Errorf("SelectTransport chose %s with both mechanisms refused", tr.Name())
+	}
+}
+
+// A DNS mechanism whose URI and SVCB are there, but whose key lookup was
+// refused for want of validation: registration demotes it and does not
+// write its address back, so the DNS carrier has nothing to dial.
+func TestARegistrationWritesNoRefusedDNSAddressBack(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), DNSTransport: &DNSTransport{}}
+	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+	old := &Address{Host: "192.0.2.20", Port: 53, Transport: "udp"}
+	peer.SetDiscoveryAddress(old)
+	peer.SetMechanismAddress("DNS", old)
+	peer.SetMechanismState("DNS", PeerStateOperational, "hello")
+	if tr := tm.SelectTransport(peer); tr == nil {
+		t.Fatal("before the refusal the DNS mechanism is not usable")
+	}
+
+	err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     dnssecPeer,
+		DNSUri:       "dns://dns.agent.example.:53",
+		DNSAddresses: []string{"192.0.2.20"},
+		Lookups: []DiscoveryLookup{
+			{Mechanism: "DNS", Type: "URI", Owner: "_dns._tcp." + dnssecPeer, Chain: ChainSecure},
+			{Mechanism: "DNS", Type: "SVCB", Owner: "dns." + dnssecPeer, Chain: ChainSecure},
+			{Mechanism: "DNS", Type: "JWK", Owner: dnssecPeer, Chain: ChainInsecure,
+				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"},
+		},
+	})
+	t.Logf("registration: %v", err)
+	if st, _ := peer.MechanismRawState("DNS"); st != PeerStateNeeded {
+		t.Errorf("DNS state %v, want NEEDED", st)
+	}
+	if a := peer.CurrentAddress(); a != nil {
+		t.Errorf("CurrentAddress %+v written back for the refused DNS mechanism", a)
+	}
+	if peer.HasMechanism("DNS") {
+		t.Error("the refused DNS mechanism is still there")
+	}
+	if tr := tm.SelectTransport(peer); tr != nil {
+		t.Errorf("SelectTransport chose %s for the refused DNS mechanism", tr.Name())
 	}
 }
