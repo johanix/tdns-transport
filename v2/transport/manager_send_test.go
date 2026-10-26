@@ -185,6 +185,43 @@ func TestSendVerbNotAcceptedFallsBack(t *testing.T) {
 	if api, dns := len(rcv.captured()), len(dnsRcv.received()); api != posts || dns != notifies {
 		t.Fatalf("a judged config: %d POSTs, %d NOTIFYs; want %d and %d", api, dns, posts, notifies)
 	}
+
+	// A refusal that only reads like the capability reply, or is another
+	// verb's, is a judgment too: it stays on the API, Answered.
+	for _, nearMiss := range []string{
+		"sender is not accepted on this zone",
+		`message type "audit" is not accepted on /api/v1/msg`,
+	} {
+		rcv.refuseWith(nearMiss)
+		_, err := tm.Send(ctx, peer, &AppMessage{TypeToken: "config", Payload: []byte(`{}`)})
+		posts++
+		if err == nil || !errors.As(err, &te) || !te.Answered {
+			t.Fatalf("a config refused with %q: %v, want an Answered *TransportError", nearMiss, err)
+		}
+		if api, dns := len(rcv.captured()), len(dnsRcv.received()); api != posts || dns != notifies {
+			t.Fatalf("a config refused with %q: %d POSTs, %d NOTIFYs; want %d and %d", nearMiss, api, dns, posts, notifies)
+		}
+	}
+}
+
+// Only the endpoint's own sentence for the verb sent is a capability
+// reply.
+func TestVerbNotAcceptedIsTheVerbsOwnSentence(t *testing.T) {
+	for _, tc := range []struct {
+		reply, verb string
+		want        bool
+	}{
+		{`message type "config" is not accepted on /api/v1/msg`, "config", true},
+		{`recipient refused: message type "confirm" is not accepted on /api/v1/msg`, "confirm", true},
+		{`message type "audit" is not accepted on /api/v1/msg`, "config", false},
+		{"sender is not accepted on this zone", "config", false},
+		{"not authorized", "confirm", false},
+		{"", "sync", false},
+	} {
+		if got := verbNotAccepted(tc.reply, tc.verb); got != tc.want {
+			t.Errorf("verbNotAccepted(%q, %q) = %v, want %v", tc.reply, tc.verb, got, tc.want)
+		}
+	}
 }
 
 // TestSendFallbackOutcomes covers the other ways out of primary-then-fallback.

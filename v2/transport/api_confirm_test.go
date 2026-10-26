@@ -311,6 +311,8 @@ func TestManagerJudgedConfirmDoesNotFallBack(t *testing.T) {
 	for i, judged := range []string{
 		"not authorized",
 		`sender "a.example." is not the client certificate's identity`,
+		"sender is not accepted on this zone",
+		`message type "sync" is not accepted on /api/v1/msg`,
 	} {
 		rcv.refuseWith(judged)
 		err := tm.Confirm(ctx, peer, testConfirmRequest())

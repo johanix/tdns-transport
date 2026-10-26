@@ -428,7 +428,7 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 			// for the same reason (tdns-transport #36).
 			if resp.Status == ConfirmFailed && isSyncFamily(r.TypeToken) {
 				err := fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message)
-				if verbNotAccepted(resp.Message) {
+				if verbNotAccepted(resp.Message, r.TypeToken) {
 					return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID, err, true)
 				}
 				return resp, NewAnsweredTransportError(t.Name(), r.TypeToken, peer.ID, err)

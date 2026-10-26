@@ -102,16 +102,17 @@ func isSyncFamily(token string) bool {
 }
 
 // verbNotAccepted reports whether a peer's refusal is the HTTPS endpoint's
-// capability reply, `message type "config" is not accepted on
-// /api/v1/msg`: the endpoint does not take the verb, so nothing judged
-// the message and the other mechanism may carry it. Every other refusal
-// is the peer's judgment of a message the endpoint took (the sender, the
-// client certificate or the handler refused it); the other mechanism
-// would get the same answer, so the refusal is Answered (tdns-transport
-// #36). Both the sync-family send path (sendWith) and
+// capability reply for the verb sent, `message type "config" is not
+// accepted on /api/v1/msg`: the endpoint does not take the verb, so
+// nothing judged the message and the other mechanism may carry it. Every
+// other refusal is the peer's judgment of a message the endpoint took
+// (the sender, the client certificate or the handler refused it), and so
+// is a refusal that merely reads alike, or names another verb; the other
+// mechanism would get the same answer, so the refusal is Answered
+// (tdns-transport #36). Both the sync-family send path (sendWith) and
 // APITransport.Confirm decide on this, so the two cannot drift.
-func verbNotAccepted(reply string) bool {
-	return strings.Contains(reply, " is not accepted on ")
+func verbNotAccepted(reply, verb string) bool {
+	return strings.Contains(reply, fmt.Sprintf("message type %q is not accepted on ", verb))
 }
 
 // SendApp sends one opaque application message as a NOTIFY(CHUNK) and
