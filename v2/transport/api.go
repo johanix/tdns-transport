@@ -287,11 +287,15 @@ func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 // it to the same handler. It is a message of its own: the PENDING and the
 // final confirmation of a SYNC come after the reply to the SYNC's POST.
 //
-// Every failure is retryable, so that TransportManager.Confirm sends the
-// confirmation over DNS instead. A receiver from before confirmations went
-// over HTTPS refuses it: its /msg takes only the sync family. Whatever
-// else keeps the API from delivering it (a timeout, an endpoint that is
-// not https, a reply that is not JSON) does not keep DNS from it.
+// Every failure is retryable. Those that do not keep DNS from the
+// receiver are not Answered, so that TransportManager.Confirm sends the
+// confirmation over DNS instead: a receiver from before confirmations went
+// over HTTPS answers that /msg does not take it (verbNotAccepted), and
+// whatever else keeps the API from delivering it (a timeout, an endpoint
+// that is not https, a reply that is not JSON). A receiver that took the
+// confirmation and refused it (the sender is not the client certificate's
+// identity, the handler refused it) has judged it; DNS would get the same
+// answer, so that refusal is Answered (tdns-transport #36).
 func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
 	if req == nil {
 		return NewTransportError("API", "Confirm", peer.ID, fmt.Errorf("empty confirmation"), false)
@@ -315,8 +319,11 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		return NewTransportError("API", "Confirm", peer.ID, err, true)
 	}
 	if resp.Status != ConfirmSuccess {
-		return NewTransportError("API", "Confirm", peer.ID,
-			fmt.Errorf("recipient refused the confirmation: %s", resp.Message), true)
+		err := fmt.Errorf("recipient refused the confirmation: %s", resp.Message)
+		if verbNotAccepted(resp.Message, VerbConfirm) {
+			return NewTransportError("API", "Confirm", peer.ID, err, true)
+		}
+		return NewAnsweredTransportError("API", "Confirm", peer.ID, err)
 	}
 	peer.Stats.recordMessageSent(VerbConfirm)
 	return nil

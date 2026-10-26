@@ -323,13 +323,21 @@ func (p *Peer) decayedMechanismState(m *MechanismState) PeerState {
 	// operational without beat evidence decays out.
 	sinceS := timeSinceOrInf(m.LastBeatSent)
 
+	st := PeerStateOperational
 	if sinceS > 10*localInterval {
-		return PeerStateInterrupted
+		st = PeerStateInterrupted
+	} else if sinceS > 2*localInterval {
+		st = PeerStateDegraded
 	}
-	if sinceS > 2*localInterval {
+	// A failed outbound send on this mechanism (RecordMechanismFailure)
+	// makes the cell at least DEGRADED even when beats still succeed:
+	// a confirmation that always falls back is a one-way pair the
+	// gossip matrix must show (tdns-mp #236). Interrupted from silence
+	// stays Interrupted.
+	if m.ConsecutiveFails > 0 && st == PeerStateOperational {
 		return PeerStateDegraded
 	}
-	return PeerStateOperational
+	return st
 }
 
 func timeSinceOrInf(t time.Time) time.Duration {
@@ -934,6 +942,46 @@ func (p *Peer) recordFailure() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ConsecutiveFails++
+}
+
+// RecordMechanismFailure counts a failed outbound send on the named
+// mechanism. ConsecutiveFails rises; MechanismEffectiveState then reads
+// at least DEGRADED while fails remain, so a one-way pair shows in the
+// gossip matrix. A recipient's Answered refusal is not a send failure
+// (tdns-mp #236, tdns-transport #36).
+func (p *Peer) RecordMechanismFailure(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Mechanisms == nil {
+		p.Mechanisms = make(map[string]*MechanismState)
+	}
+	m, ok := p.Mechanisms[name]
+	if !ok || m == nil {
+		m = &MechanismState{}
+		p.Mechanisms[name] = m
+	}
+	m.ConsecutiveFails++
+}
+
+// RecordMechanismSuccess clears the consecutive-failure count on the
+// named mechanism after a successful send on it.
+func (p *Peer) RecordMechanismSuccess(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m := p.Mechanisms[name]; m != nil {
+		m.ConsecutiveFails = 0
+	}
+}
+
+// MechanismConsecutiveFails is the named mechanism's consecutive outbound
+// send failures, or 0 when the mechanism is absent.
+func (p *Peer) MechanismConsecutiveFails(name string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if m := p.Mechanisms[name]; m != nil {
+		return m.ConsecutiveFails
+	}
+	return 0
 }
 
 // isHealthy returns true if the peer is in a healthy state.

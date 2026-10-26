@@ -181,6 +181,14 @@ type TransportError struct {
 	PeerID    string // Peer involved
 	Err       error  // Underlying error
 	Retryable bool   // Whether the operation can be retried
+	// Answered is true when the peer received the message and answered
+	// with an application-level refusal. The send reached the recipient;
+	// the other mechanism would get the same judgment. sendWith does not
+	// fall back on an Answered error. The error stays retryable for the
+	// caller's queue (tdns-transport #36). A reply that the endpoint does
+	// not take the verb is not a judgment and is not Answered
+	// (verbNotAccepted).
+	Answered bool
 }
 
 func (e *TransportError) Error() string {
@@ -202,5 +210,19 @@ func NewTransportError(transport, op, peerID string, err error, retryable bool) 
 		PeerID:    peerID,
 		Err:       err,
 		Retryable: retryable,
+	}
+}
+
+// NewAnsweredTransportError is a retryable TransportError for a message
+// the recipient received and refused. sendWith returns it without trying
+// the other mechanism.
+func NewAnsweredTransportError(transport, op, peerID string, err error) *TransportError {
+	return &TransportError{
+		Op:        op,
+		Transport: transport,
+		PeerID:    peerID,
+		Err:       err,
+		Retryable: true,
+		Answered:  true,
 	}
 }
