@@ -475,11 +475,14 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	apiUsable := !apiRefused && result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
 		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
-		// DiscoveryAddr is the slot the DNS carrier dials. A peer with no DNS
-		// address gets API's there, but only once the API mechanism is
-		// usable: before, with DNS refused, say, the DNS carrier would send
-		// to the HTTPS endpoint.
-		if peer.MechanismAddress(MechanismDNS) == nil {
+		// DiscoveryAddr is the slot the DNS carrier dials (SelectTransport
+		// reads it, not the DNS mechanism, as peers known from config or a
+		// hello have no mechanism slots). A peer that offers no DNS gets
+		// API's address there, once the API mechanism is usable. One that
+		// offers DNS does not: with its DNS refused or unresolved, the DNS
+		// carrier would send to the HTTPS endpoint, and API is the way to
+		// reach it.
+		if result.DNSUri == "" && peer.MechanismAddress(MechanismDNS) == nil {
 			peer.SetDiscoveryAddress(peer.MechanismAddress(MechanismAPI))
 		}
 		peer.SetMechanismContactInfo("API", "complete")

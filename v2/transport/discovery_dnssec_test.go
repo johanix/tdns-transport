@@ -745,3 +745,47 @@ func TestAnUnusableAPIIsNoAddressForTheDNSCarrier(t *testing.T) {
 		t.Errorf("CurrentAddress %+v, want the usable API's address %+v on a peer with no DNS", a, api)
 	}
 }
+
+// DNS refused, API usable, and a peer that prefers DNS: SelectTransport
+// takes API. The API's address is not put where the DNS carrier dials it,
+// as the peer offers DNS (CodeRabbit on #39 at a84ac32).
+func TestRefusedDNSWithAUsableAPISelectsAPI(t *testing.T) {
+	tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
+	peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+	tlsa, err := dns.NewRR("_8443._tcp.api." + dnssecPeer + " 600 IN TLSA 3 1 1 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = tm.RegisterDiscoveredPeer(&DiscoveryResult{
+		Identity:     dnssecPeer,
+		APIUri:       "https://api.agent.example.:8443/api",
+		APIAddresses: []string{"192.0.2.10"},
+		TLSA:         TLSASet{Owner: "_8443._tcp.api." + dnssecPeer, Records: []*dns.TLSA{tlsa.(*dns.TLSA)}, Validated: true},
+		DNSUri:       "dns://dns.agent.example.:53",
+		DNSAddresses: []string{"192.0.2.20"},
+		Lookups: []DiscoveryLookup{
+			{Mechanism: "DNS", Type: "JWK", Owner: dnssecPeer, Chain: ChainInsecure,
+				Failure: FailureNotValidated, Detail: "answer insecure, DNSSEC validation required"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("registration: %v", err)
+	}
+	if !peer.APIUsable() {
+		t.Fatal("the API mechanism is not usable")
+	}
+	// Registration prefers API when it is offered; the application may set
+	// DNS (tdns-mp does for a peer that offers only DNS), and Send falls
+	// back to DNS when HTTPS fails: neither may dial the API's address.
+	peer.SetPreferredTransport("DNS")
+	if a := peer.CurrentAddress(); a != nil {
+		t.Errorf("CurrentAddress %+v: the API's address is where the DNS carrier dials it", a)
+	}
+	if tr := tm.SelectTransport(peer); tr == nil || tr.Name() != "API" {
+		got := "nothing"
+		if tr != nil {
+			got = tr.Name()
+		}
+		t.Errorf("SelectTransport chose %s, want API", got)
+	}
+}
