@@ -238,6 +238,172 @@ func TestTheNumberOfSendsInFlightIsBounded(t *testing.T) {
 	})
 }
 
+// blockedBatch is one recipient's batch whose first message, "first", is
+// in flight, blocked until release is closed or ctx is cancelled, with
+// the other messages waiting behind it in the same batch.
+type blockedBatch struct {
+	q       *ReliableMessageQueue
+	rec     *sendRecorder
+	ctx     context.Context
+	cancel  context.CancelFunc
+	release chan struct{}
+}
+
+// batchBehindABlockedSend queues "first" and then the waiting messages,
+// all for one recipient. The waiting ones are made resends: delivered
+// once, with their confirmation wait run out. processQueue is driven by
+// hand, so the batch is exactly these messages.
+func batchBehindABlockedSend(t *testing.T, waiting ...string) *blockedBatch {
+	t.Helper()
+	cfg := testQueueConfig()
+	cfg.ConfirmTimeout = time.Minute
+	cfg.MaxConfirmWait = time.Minute
+	b := &blockedBatch{q: NewReliableMessageQueue(cfg), rec: &sendRecorder{}, release: make(chan struct{})}
+
+	started := make(chan struct{})
+	b.q.setSendFunc(func(ctx context.Context, msg *OutgoingMessage) error {
+		_ = b.rec.send(ctx, msg)
+		if msg.DistributionID == "first" {
+			close(started)
+			select {
+			case <-b.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+
+	enqueue(t, b.q, "first")
+	for _, id := range waiting {
+		enqueue(t, b.q, id)
+	}
+	b.q.mu.Lock()
+	for _, id := range waiting {
+		p := b.q.pending[pendingKey(id, "agent.example.")]
+		p.State = MessageAwaitingConfirm
+		p.AttemptCount = 1
+		p.NextAttempt = time.Now().Add(-time.Millisecond)
+	}
+	b.q.mu.Unlock()
+
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		b.cancel()
+		b.q.senders.Wait()
+	})
+	b.q.processQueue(b.ctx)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("the batch's first send never started")
+	}
+	return b
+}
+
+// entryOf returns a copy of the queue's entry for a message.
+func entryOf(q *ReliableMessageQueue, distID string) (pendingMessage, bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	p, ok := q.pending[pendingKey(distID, "agent.example.")]
+	if !ok {
+		return pendingMessage{}, false
+	}
+	return *p, true
+}
+
+func TestAResendWaitingInItsBatchKeepsItsStateAndItsPendingAtShutdown(t *testing.T) {
+	b := batchBehindABlockedSend(t, "resend")
+
+	// While it waits behind "first", it is not being sent, and no resend
+	// is counted yet.
+	if s := snapshot(b.q, "resend"); s == nil || s.State != MessageAwaitingConfirm.String() {
+		t.Fatalf("the waiting resend shows as %+v, want state %s", s, MessageAwaitingConfirm)
+	}
+	if n := b.q.GetStats().TotalResent; n != 0 {
+		t.Fatalf("%d resends counted before the resend's own send", n)
+	}
+
+	// The recipient answers PENDING for it, and then the batch is cut
+	// short by the shutdown.
+	if !b.q.MarkPending("resend", "agent.example.") {
+		t.Fatal("the pending found no message")
+	}
+	b.cancel()
+	b.q.senders.Wait()
+
+	p, ok := entryOf(b.q, "resend")
+	if !ok {
+		t.Fatal("the resend is gone from the queue")
+	}
+	if p.State != MessageAwaitingConfirm || !p.NextAttempt.After(time.Now()) {
+		t.Fatalf("after the shutdown: state %s, next attempt in %v; want %s with its wait started over", p.State, time.Until(p.NextAttempt).Round(time.Millisecond), MessageAwaitingConfirm)
+	}
+	if n := b.rec.count(); n != 1 || p.Resends != 0 || b.q.GetStats().TotalResent != 0 {
+		t.Fatalf("sends %d, resends %d, total resent %d; want only the first send and no resend", n, p.Resends, b.q.GetStats().TotalResent)
+	}
+}
+
+func TestAMessageClosedWhileWaitingInItsBatchCountsNoResend(t *testing.T) {
+	b := batchBehindABlockedSend(t, "confirmed", "expired", "pended")
+
+	// While "first" is in flight: one waiting resend is confirmed, one
+	// expires, and the recipient answers PENDING for the third.
+	if !b.q.MarkConfirmed("confirmed", "agent.example.") {
+		t.Fatal("the confirmation found no message")
+	}
+	b.q.mu.Lock()
+	b.q.pending[pendingKey("expired", "agent.example.")].Message.ExpiresAt = time.Now().Add(-time.Millisecond)
+	b.q.mu.Unlock()
+	b.q.processQueue(b.ctx) // removes the expired one; the recipient is busy, so nothing new starts
+	if !b.q.MarkPending("pended", "agent.example.") {
+		t.Fatal("the pending found no message")
+	}
+
+	close(b.release)
+	b.q.senders.Wait()
+
+	st := b.q.GetStats()
+	if n := b.rec.count(); n != 1 {
+		t.Fatalf("%d sends, want only the first", n)
+	}
+	if st.TotalResent != 0 || st.TotalDelivered != 1 || st.TotalExpired != 1 {
+		t.Fatalf("resent %d, delivered %d, expired %d; want 0, 1, 1", st.TotalResent, st.TotalDelivered, st.TotalExpired)
+	}
+	if p, ok := entryOf(b.q, "pended"); !ok || p.Resends != 0 || p.State != MessageAwaitingConfirm {
+		t.Fatalf("the message answered pending: %+v (in queue %v), want awaiting its confirmation with no resend", p, ok)
+	}
+}
+
+func TestATickAfterTheCancelStartsNoBatch(t *testing.T) {
+	cfg := testQueueConfig()
+	cfg.ConfirmTimeout = time.Minute
+	cfg.MaxConfirmWait = time.Minute
+	q := NewReliableMessageQueue(cfg)
+	rec := &sendRecorder{}
+	q.setSendFunc(rec.send)
+	enqueue(t, q, "resend")
+	q.mu.Lock()
+	p := q.pending[pendingKey("resend", "agent.example.")]
+	p.State = MessageAwaitingConfirm
+	p.AttemptCount = 1
+	p.NextAttempt = time.Now().Add(-time.Millisecond)
+	q.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	q.processQueue(ctx)
+	q.mu.RLock()
+	busy := len(q.busy)
+	q.mu.RUnlock()
+	q.senders.Wait()
+
+	e, ok := entryOf(q, "resend")
+	if busy != 0 || rec.count() != 0 || !ok || e.State != MessageAwaitingConfirm || e.Resends != 0 || q.GetStats().TotalResent != 0 {
+		t.Fatalf("after a tick on a cancelled context: %d recipients busy, %d sends, entry %+v (in queue %v), total resent %d; want nothing started", busy, rec.count(), e, ok, q.GetStats().TotalResent)
+	}
+}
+
 func TestANonPositiveSendBoundGetsTheDefault(t *testing.T) {
 	for _, n := range []int{0, -1} {
 		q := NewReliableMessageQueue(&ReliableMessageQueueConfig{MaxConcurrentSends: n})

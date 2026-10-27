@@ -500,6 +500,11 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	}
 	sort.Slice(batches, func(i, j int) bool { return batches[i][0].seq < batches[j][0].seq })
 
+	// Start can take a tick that came with the cancel: no batch starts
+	// after it.
+	if ctx.Err() != nil {
+		return
+	}
 	for _, batch := range batches {
 		select {
 		case q.sendSlots <- struct{}{}:
@@ -507,17 +512,9 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 			// Every slot is taken: the rest waits for a later tick.
 			return
 		}
-		for _, pending := range batch {
-			// Ready to send. A delivered message whose final confirmation
-			// did not come within its wait goes again, same ID and nonce.
-			if pending.State == MessageAwaitingConfirm {
-				pending.Resends++
-				q.totalResent++
-				slog.Info("no final confirmation, sending again", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "zone", pending.Message.Zone, "resend", pending.Resends, "age", now.Sub(pending.Message.CreatedAt).Round(time.Second))
-			}
-			pending.State = MessageSending
-			pending.HeardPending = false
-		}
+		// Each message turns SENDING as its own send starts
+		// (attemptDelivery); until then it keeps its state, and busy
+		// keeps the next tick from collecting it again.
 		recipient := batch[0].Message.RecipientID
 		q.busy[recipient] = true
 		q.senders.Add(1)
@@ -531,14 +528,9 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 func (q *ReliableMessageQueue) deliverBatch(ctx context.Context, recipient string, batch []*pendingMessage) {
 	defer q.senders.Done()
 
-	for i, pending := range batch {
+	for _, pending := range batch {
+		// Shutting down: the rest is not sent, and keeps its state.
 		if ctx.Err() != nil {
-			// Shutting down: the rest is not sent, and stays queued.
-			q.mu.Lock()
-			for _, p := range batch[i:] {
-				p.State = MessageQueued
-			}
-			q.mu.Unlock()
 			break
 		}
 		q.attemptDelivery(ctx, pending)
@@ -563,22 +555,33 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 	msg := pending.Message
 	key := pendingKey(msg.DistributionID, msg.RecipientID)
 
-	// A message confirmed or expired while it waited behind the
-	// recipient's earlier messages is no longer ours to send.
-	q.mu.RLock()
-	ours := q.pending[key] == pending
-	q.mu.RUnlock()
-	if !ours {
+	// The message may have waited behind the recipient's earlier messages
+	// in its batch. Confirmed or expired meanwhile, it is no longer ours
+	// to send; answered PENDING meanwhile, its wait started over and it
+	// is not due.
+	q.mu.Lock()
+	if q.pending[key] != pending || time.Now().Before(pending.NextAttempt) {
+		q.mu.Unlock()
 		return
 	}
 
 	if q.sendFunc == nil {
-		q.mu.Lock()
 		pending.LastError = "no sendFunc configured"
 		q.scheduleRetryLocked(pending, true)
 		q.mu.Unlock()
 		return
 	}
+
+	// Ready to send. A delivered message whose final confirmation did not
+	// come within its wait goes again, same ID and nonce.
+	if pending.State == MessageAwaitingConfirm {
+		pending.Resends++
+		q.totalResent++
+		slog.Info("no final confirmation, sending again", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "zone", msg.Zone, "resend", pending.Resends, "age", time.Since(msg.CreatedAt).Round(time.Second))
+	}
+	pending.State = MessageSending
+	pending.HeardPending = false
+	q.mu.Unlock()
 
 	// Attempt delivery
 	err := q.sendFunc(ctx, msg)
