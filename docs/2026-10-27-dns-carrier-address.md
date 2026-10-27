@@ -1,7 +1,7 @@
 # The DNS carrier dials only a DNS address
 
-Date: 2026-10-27. Status: reviewed twice. Decision 1 settled (the
-check, below); decision 2 waits on Johan.
+Date: 2026-10-27. Status: reviewed twice; both decisions settled by
+Johan on 2026-10-27 (the check, and the rename). Waits on #43 and #270.
 Follows tdns-transport #39. Follow-up: tdns-transport #44. Refs johanix/tdns-mp#260.
 
 ## The problem
@@ -70,8 +70,8 @@ costs is a delay and a failure counted against the mechanism.
    let no other kind of address reach the DNS carrier.
 4. **A new `Peer.Addressable()` answers the other question.** It reports
    whether there is somewhere to send to the peer:
-   `p.CurrentAddress() != nil || p.APIUsable()` (under decision 2,
-   `p.DNSCarrierAddress() != nil || p.APIUsable()`). It does not take
+   `p.DNSCarrierAddress() != nil || p.APIUsable()` (`DNSCarrierAddress()`
+   is today's `CurrentAddress()`, renamed below). It does not take
    `p.mu` itself, since both calls take it, and a second read lock can
    deadlock behind a waiting writer. That makes it non-atomic, which is
    fine for this question.
@@ -146,25 +146,23 @@ tdns-nm and tdns use none of these accessors.
 
 ## Naming
 
-**Decision 2, for Johan.**
+**Decision 2, settled 2026-10-27: rename.**
 
-- **(a) Keep the names.** The doc comments carry the rule. The diff is
-  smaller, and tdns-mp builds unchanged after the re-pin. But its four
-  "addressable" sites then change behaviour silently until someone edits
-  them.
-- **(b) Rename (recommended).**
-  - `CurrentAddress()` becomes `DNSCarrierAddress()`.
-  - `SetDiscoveryAddress` becomes `SetDNSCarrierAddress`.
-  - `DiscoveryAddr` becomes `DNSCarrierAddr`.
-  - "DNS carrier" keeps these apart from `Mechanisms["DNS"].Address`. The two
-    can differ: config writes one, and discovery writes both.
-  - `OperationalAddr` keeps its name. Its comment states the rule, and its
-    setter checks it.
-  - The compiler then finds every caller in tdns-mp, and each one chooses
-    `DNSCarrierAddress()` or `Addressable()`. No shim: tdns-mp pins
-    tdns-transport.
+- `CurrentAddress()` becomes `DNSCarrierAddress()`.
+- `SetDiscoveryAddress` becomes `SetDNSCarrierAddress`.
+- `DiscoveryAddr` becomes `DNSCarrierAddr`.
+- "DNS carrier" keeps these apart from `Mechanisms["DNS"].Address`. The two
+  can differ: config writes one, and discovery writes both.
+- `OperationalAddr` keeps its name. Its comment states the rule, and its
+  setter checks it.
 
-Either way, the comments that describe the slots go too:
+The compiler then finds every caller in tdns-mp, and each one chooses
+`DNSCarrierAddress()` or `Addressable()`. Keeping the names would have let
+tdns-mp build unchanged after the re-pin, with its four "addressable"
+sites changing behaviour silently until someone edited them. There is no
+shim: tdns-mp pins tdns-transport.
+
+The comments that describe the slots change too:
 - `peer.go:76-80`: its field comment, "Address discovered via DNS", is
   already wrong, since config writes the slot too;
 - `SetMechanismAddress`'s comment;
@@ -175,7 +173,7 @@ Either way, the comments that describe the slots go too:
 ## Plan
 
 This comes after the work in flight on the same files. tdns-transport #43
-edits `manager.go`, and once (b) is on transport main, tdns-mp does not
+edits `manager.go`, and once the rename is on transport main, tdns-mp does not
 build against it until its callers change.
 
 1. tdns-transport #43 merges. Then tdns-mp #270 re-pins to it and merges.
@@ -184,7 +182,7 @@ build against it until its callers change.
    - the setter check;
    - `demoteMechanism`'s API case reduced to its own slot;
    - `Addressable()`;
-   - (b), if chosen;
+   - the rename;
    - the comment sweep;
    - the tests below.
 3. One tdns-mp PR with:
