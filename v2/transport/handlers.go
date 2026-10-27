@@ -32,28 +32,31 @@ func HandleConfirmation(ctx *MessageContext) error {
 
 	status := parseConfirmStatus(confirm.Status)
 
-	// Forward to transport's reliable message queue (marks distribution as confirmed).
-	if transport := ctx.DNSTransport(); transport != nil {
-		transport.handleIncomingConfirmation(&IncomingConfirmation{
-			DistributionID: confirm.DistributionID,
-			PeerID:         confirm.SenderID,
-			Status:         status,
-			Message:        confirm.Message,
-			Timestamp:      time.Unix(confirm.Timestamp, 0),
-			Zone:           confirm.Zone,
-			AppliedRecords: confirm.AppliedRecords,
-			RemovedRecords: confirm.RemovedRecords,
-			RejectedItems:  confirm.RejectedItems,
-			IgnoredRecords: confirm.IgnoredRecords,
-			Truncated:      confirm.Truncated,
-			Nonce:          confirm.Nonce,
-		})
+	in := &IncomingConfirmation{
+		DistributionID: confirm.DistributionID,
+		PeerID:         confirm.SenderID,
+		Status:         status,
+		Message:        confirm.Message,
+		App:            confirm.App,
+		Timestamp:      time.Unix(confirm.Timestamp, 0),
+		Zone:           confirm.Zone,
+		AppliedRecords: confirm.AppliedRecords,
+		RemovedRecords: confirm.RemovedRecords,
+		RejectedItems:  confirm.RejectedItems,
+		IgnoredRecords: confirm.IgnoredRecords,
+		Truncated:      confirm.Truncated,
+		Nonce:          confirm.Nonce,
 	}
 
-	// Forward confirmation detail to the application's consumer
+	// Forward to transport's reliable message queue (marks distribution as confirmed).
+	if transport := ctx.DNSTransport(); transport != nil {
+		transport.handleIncomingConfirmation(in)
+	}
+
+	// Forward the confirmation, its message and the application's data with
+	// it, to the application's consumer.
 	if cb := ctx.ConfirmationCallback(); cb != nil && confirm.DistributionID != "" {
-		cb(confirm.DistributionID, confirm.SenderID, status,
-			confirm.Zone, confirm.AppliedRecords, confirm.RemovedRecords, confirm.RejectedItems, confirm.IgnoredRecords, confirm.Truncated, confirm.Nonce)
+		cb(in)
 	}
 
 	lgTransport().Debug("confirmation processed", "peer", ctx.PeerID, "status", confirm.Status)

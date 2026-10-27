@@ -66,9 +66,10 @@ type ChunkNotifyHandler struct {
 
 	// OnConfirmationReceived is called when a confirmation is received for a distribution ID.
 	// Used by TransportManager to mark messages as confirmed in the ReliableMessageQueue
-	// and to forward per-RR detail to the SynchedDataEngine.
-	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
-		zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
+	// and to forward per-RR detail to the SynchedDataEngine. It gets the whole
+	// confirmation: its message (a PENDING's text) and the application's own
+	// data (App) as well as the records.
+	OnConfirmationReceived func(c *IncomingConfirmation)
 
 	// GossipForPeer returns serialized gossip data for a given peer.
 	// Used by handleBeat to include gossip in beat responses.
