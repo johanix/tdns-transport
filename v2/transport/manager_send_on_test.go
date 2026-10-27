@@ -154,14 +154,15 @@ func TestSendOnJudgedRefusalStays(t *testing.T) {
 }
 
 // A failure to deliver on the first choice is counted against it and the
-// other mechanism carries the message; a send the first choice carries
-// clears the count (tdns-mp #236).
+// other mechanism carries the message; the mechanism that carries it, first
+// or other, has its count cleared (tdns-mp #236).
 func TestSendOnCountsAFailureToDeliver(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tm, rcv, dnsRcv, peer := sendOnRig(t)
 	peer.RecordMechanismFailure(MechanismAPI)
 	peer.RecordMechanismFailure(MechanismAPI)
+	peer.RecordMechanismFailure(MechanismDNS)
 
 	if _, _, err := tm.SendOn(ctx, peer, MechanismAPI, configAnswer()); err != nil {
 		t.Fatalf("SendOn: %v", err)
@@ -180,7 +181,7 @@ func TestSendOnCountsAFailureToDeliver(t *testing.T) {
 		t.Errorf("the API has %d failures counted, want 1", n)
 	}
 	if n := peer.MechanismConsecutiveFails(MechanismDNS); n != 0 {
-		t.Errorf("DNS, the fallback, has %d failures counted, want 0", n)
+		t.Errorf("DNS, the fallback that carried it, has %d failures counted, want its 1 cleared", n)
 	}
 }
 

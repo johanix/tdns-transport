@@ -353,9 +353,10 @@ type SendOutcome struct {
 // there is another mechanism, the first try gets half of ctx's time.
 //
 // A failure to deliver on the first choice is counted against that
-// mechanism (RecordMechanismFailure), and a send it carries clears the
-// count (RecordMechanismSuccess), so a pair that works one way only shows
-// in the gossip matrix (tdns-mp #236). A judged refusal and a verb the
+// mechanism (RecordMechanismFailure), so a pair that works one way only
+// shows in the gossip matrix (tdns-mp #236). The mechanism that carries
+// req, the first or the other, has its count cleared
+// (RecordMechanismSuccess). A judged refusal and a verb the
 // mechanism does not carry are answers, not failures to deliver, and are
 // not counted. The outcome says which mechanism carried req, and why the
 // first did not.
@@ -377,11 +378,11 @@ func (tm *TransportManager) SendOn(ctx context.Context, peer *Peer, mechanism st
 		fallback = nil
 	}
 	resp, out, err := send(ctx, peer, req, primary, fallback, true)
-	switch {
-	case out.First != "" && out.FirstErr == nil:
-		peer.RecordMechanismSuccess(out.First)
-	case undelivered(out.FirstErr):
+	if undelivered(out.FirstErr) {
 		peer.RecordMechanismFailure(out.First)
+	}
+	if out.Carrier != "" {
+		peer.RecordMechanismSuccess(out.Carrier)
 	}
 	return resp, out, err
 }
