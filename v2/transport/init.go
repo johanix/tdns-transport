@@ -115,7 +115,7 @@ The hsyncengine should select transport based on peer configuration:
 		if engine.apiTransport != nil && peer.GetAPIEndpoint() != "" {
 			return engine.apiTransport
 		}
-		if engine.dnsTransport != nil && peer.CurrentAddress() != nil {
+		if engine.dnsTransport != nil && peer.DNSCarrierAddress() != nil {
 			return engine.dnsTransport
 		}
 

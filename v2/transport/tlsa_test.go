@@ -183,7 +183,7 @@ func TestNoTLSAIsNotDialed(t *testing.T) {
 
 	dnsT := NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example."})
 	tm := &TransportManager{APITransport: tr, DNSTransport: dnsT}
-	peer.SetDiscoveryAddress(&Address{Host: "127.0.0.1", Port: 53, Transport: "tcp"})
+	setDNSCarrier(t, peer, &Address{Host: "127.0.0.1", Port: 53, Transport: "tcp"})
 	if got := tm.SelectTransport(peer); got != Transport(dnsT) {
 		t.Errorf("SelectTransport picked %v for a peer with no TLSA, want DNS", got)
 	}

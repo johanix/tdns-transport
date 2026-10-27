@@ -1,7 +1,9 @@
 # The DNS carrier dials only a DNS address
 
 Date: 2026-10-27. Status: reviewed twice; both decisions settled by
-Johan on 2026-10-27 (the check, and the rename). Waits on #43 and #270.
+Johan on 2026-10-27 (the check, and the rename). Implemented in the same
+PR, #42, after #43 and #270 merged (see the amendment at the end). The
+tdns-mp half is not done yet.
 Follows tdns-transport #39. Follow-up: tdns-transport #44. Refs johanix/tdns-mp#260.
 
 ## The problem
@@ -226,3 +228,22 @@ the check.
 | The same four sites, with that peer's TLSA withdrawn | It no longer counts as addressable. The deliverer starts a discovery, and `rearmFailedDiscovery` re-arms the peer. |
 | A relocate naming an `https` address | Refused. The old address is kept. |
 | The API display for a peer with both mechanisms | It shows the API's address. |
+
+## Amendment 2026-10-27: implemented
+
+The tdns-transport half is implemented in PR #42 itself, next to this doc,
+and not in a PR of its own (Johan). Plan step 2 is therefore #42. Step 3,
+the tdns-mp PR, follows once #42 merges.
+
+It follows the design. Where the design left details open:
+
+- The setters return an error that names the peer and the address. An
+  address with no `Transport` is refused too, as it is neither `udp` nor
+  `tcp`. Every caller in tdns-transport and tdns-mp passes one.
+- The new tests are in `dns_carrier_address_test.go`. The test that
+  "registration never writes a non-DNS address" is one table of
+  registrations, with two cases that come in two steps: the TLSA
+  withdrawn, and the API moved. The two faults are also tested through
+  discovery and its refresh.
+- With the old fallback put back for a check, both of those tests fail, as
+  do the registration cases that bring them about.

@@ -218,7 +218,7 @@ func buildChunkQueryQnameWithSeq(sequence uint16, baseQname string) string {
 
 // Hello sends a hello handshake request to a peer via DNS.
 func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest) (*HelloResponse, error) {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	if addr == nil {
 		return nil, NewTransportError("DNS", "Hello", peer.ID, fmt.Errorf("no address available"), false)
 	}
@@ -259,7 +259,7 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 
 // Beat sends a heartbeat to a peer via DNS.
 func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (*BeatResponse, error) {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	if addr == nil {
 		return nil, NewTransportError("DNS", "Beat", peer.ID, fmt.Errorf("no address available"), false)
 	}
@@ -308,7 +308,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 
 // Ping sends a liveness probe via DNS NOTIFY(CHUNK); response carries ping_confirm in EDNS0.
 func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	if addr == nil {
 		return nil, NewTransportError("DNS", "Ping", peer.ID, fmt.Errorf("no address available"), false)
 	}
@@ -485,7 +485,7 @@ func buildConfirmPayload(req *ConfirmRequest) *DnsConfirmPayload {
 // Confirm sends an acknowledgment of a sync operation via DNS.
 // Uses NOTIFY(CHUNK) with status in EDNS0 option.
 func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	if addr == nil {
 		return NewTransportError("DNS", "Confirm", peer.ID, fmt.Errorf("no address available"), false)
 	}
@@ -543,7 +543,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 
 // sendNotifyWithPayload sends a NOTIFY(CHUNK) with payload and waits for confirmation.
 func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, distributionID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payload
