@@ -1,9 +1,8 @@
 # The DNS carrier dials only a DNS address
 
 Date: 2026-10-27. Status: reviewed twice; both decisions settled by
-Johan on 2026-10-27 (the check, and the rename). Implemented in the same
-PR, #42, after #43 and #270 merged (see the amendments at the end). The
-tdns-mp half is johanix/tdns-mp#282; the ping is amended there.
+Johan on 2026-10-27 (the check, and the rename). Implemented in this PR,
+#42, after #43 and #270 merged. The tdns-mp half is johanix/tdns-mp#282.
 Follows tdns-transport #39. Follow-up: tdns-transport #44. Refs johanix/tdns-mp#260.
 
 ## The problem
@@ -62,8 +61,9 @@ costs is a delay and a failure counted against the mechanism.
    `OperationalAddr` hold only addresses the DNS carrier dials. The fallback
    goes. The setters check the rule: an address whose `Transport` is not
    `udp` or `tcp`, or that has a `Path`, is refused with an error, and the
-   slot keeps what it had. The DNS carrier dials over TCP either way, so the
-   check is in effect "not https, and no path".
+   slot keeps what it had. An address with no `Transport` is refused too,
+   and the error names the peer and the address. The DNS carrier dials over
+   TCP either way, so the check is in effect "not https, and no path".
 2. **The API's address lives only in its mechanism slot.** It stays there
    with `APIEndpoint`, as now. Only the HTTPS mechanism dials it.
 3. **`SelectTransport` and `reaches` are unchanged.** They choose DNS when
@@ -124,7 +124,7 @@ it asks whether there is anywhere to send.
 |---|---|---|---|
 | `hsync_transport.go:647` `OnDiscoveryFailed` | `(st >= Known && st != Error) \|\| CurrentAddress() != nil` | addressable | `Addressable()` replaces the address clause only; the state clause stays. The state clause already passes a registered API-only peer. |
 | `hsync_transport.go:1123` the deliverer has an address | `CurrentAddress() == nil` | addressable | `!Addressable()`. Without it, every message from an API-only deliverer starts a discovery. |
-| `apihandler_agent_distrib.go:185` ping | `CurrentAddress() == nil` | addressable | `!Addressable()`. Without it, a ping to an API-only peer is refused before `SendPing`, which goes through `Send` and can use the API. Its reply at `:203` says "dnsping ok" over either mechanism; name the mechanism. |
+| `apihandler_agent_distrib.go:185` ping | `CurrentAddress() == nil` | the transport named | Ping over the transport the operator names, and only that one: `--dns` (the default) or `--api`, as `peer ping` and `peer apiping` do. The other is not tried, and the reply names the transport. `Addressable()` does not apply: over DNS, an API-only peer has no address, and the ping fails without dialling its HTTPS address. Today this operation calls `SendPing`, which takes the preferred mechanism and falls back. It honours `--dns`/`--api` only for the combiner, and its reply at `:203` says "dnsping ok" over either. `peer ping` also calls `SendPing`, while saying "dns transport". |
 | `hsync_bridge.go:58` `rearmFailedDiscovery` | `CurrentAddress() != nil` | addressable | `Addressable()`. Where main holds a stale fallback (an ERROR peer whose API went back to NEEDED after a TLSA withdrawal), main returns early and never re-arms. Under the rule the peer is re-armed, which is right. |
 | `apihandler_agent_distrib.go:263` discovery display | `CurrentAddress()` | either | Show the DNS address and the API's separately. |
 | `apihandler_agent_distrib.go:385` API display | `CurrentAddress()` | API | `MechanismAddress("API")`. Today a peer with both mechanisms shows its DNS address as the API's. |
@@ -139,6 +139,7 @@ it asks whether there is anywhere to send.
 The tdns-mp tests that call these accessors:
 - `api_confirm_test.go`
 - `api_tlsa_test.go`
+- `https_answer_test.go`
 - `peer_ipv6_test.go`
 - `sender_rule_test.go`
 - `transport_dispatch_test.go`
@@ -160,8 +161,8 @@ tdns-nm and tdns use none of these accessors.
 
 The compiler then finds every caller in tdns-mp, and each one chooses
 `DNSCarrierAddress()` or `Addressable()`. Keeping the names would have let
-tdns-mp build unchanged after the re-pin, with its four "addressable"
-sites changing behaviour silently until someone edited them. There is no
+tdns-mp build unchanged after the re-pin, with its "addressable" sites
+changing behaviour silently until someone edited them. There is no
 shim: tdns-mp pins tdns-transport.
 
 The comments that describe the slots change too:
@@ -179,7 +180,7 @@ edits `manager.go`, and once the rename is on transport main, tdns-mp does not
 build against it until its callers change.
 
 1. tdns-transport #43 merges. Then tdns-mp #270 re-pins to it and merges.
-2. A tdns-transport PR with:
+2. This PR, #42, with:
    - the fallback removed;
    - the setter check;
    - `demoteMechanism`'s API case reduced to its own slot;
@@ -191,7 +192,7 @@ build against it until its callers change.
    - the re-pin;
    - the call-site changes above;
    - the relocate check;
-   - the ping text and the two displays;
+   - the ping over the named transport, and the two displays;
    - its tests.
 
    After it, run the end-to-end tests that exercise TLSA and API
@@ -203,7 +204,9 @@ build against it until its callers change.
 ### tdns-transport
 
 These cover every case #39's tests cover, plus the two remaining faults and
-the check.
+the check. The new ones are in `dns_carrier_address_test.go`. The two faults
+are tested through discovery and its refresh; with the old fallback put
+back, both fail.
 
 | Case | Test | Outcome under the rule |
 |---|---|---|
@@ -217,51 +220,17 @@ the check.
 | TLSA withdrawn from an API-only peer | new | Nothing selected. Fails on main. |
 | API address moved, no TLSA for it yet | new | No DNS address, and the old one is not dialled. Fails on main. |
 | The setters refuse a non-DNS address | new | An `https` address, or one with a `Path`, returns an error, and the slot keeps the old address. |
-| Registration never writes a non-DNS address for the DNS carrier | new, over every registration case above | `DiscoveryAddr` is nil or a DNS address. |
+| Registration never writes a non-DNS address for the DNS carrier | new: a table of the registration cases above, the TLSA withdrawn and the API moved each in two steps | `DiscoveryAddr` is nil or a DNS address. |
 | `Addressable()` | new | Covers a peer with a DNS address only, a usable API only, an unusable API only, and nothing. |
 
 ### tdns-mp
 
 | Case | Outcome |
 |---|---|
-| Each of the four "addressable" sites, with an API-only peer whose API is usable | It counts as addressable, as it does today. Today that comes through the fallback at the deliverer and ping. |
-| The same four sites, with that peer's TLSA withdrawn | It no longer counts as addressable. The deliverer starts a discovery, and `rearmFailedDiscovery` re-arms the peer. |
+| Each of the three "addressable" sites, with an API-only peer whose API is usable | It counts as addressable, as it does today. At the deliverer that comes through the fallback today. |
+| The same three sites, with that peer's TLSA withdrawn | It no longer counts as addressable. The deliverer starts a discovery, and `rearmFailedDiscovery` re-arms the peer. |
+| A DNS ping to an API-only peer, its API usable or not | No DNS address: it fails without dialling the HTTPS address, and the API is not tried. |
+| An API ping with the TLSA withdrawn | Not dialled. |
+| A DNS ping that fails | The API is not tried. |
 | A relocate naming an `https` address | Refused. The old address is kept. |
 | The API display for a peer with both mechanisms | It shows the API's address. |
-
-## Amendment 2026-10-27: implemented
-
-The tdns-transport half is implemented in PR #42 itself, next to this doc,
-and not in a PR of its own (Johan). Plan step 2 is therefore #42. Step 3,
-the tdns-mp PR, follows once #42 merges.
-
-It follows the design. Where the design left details open:
-
-- The setters return an error that names the peer and the address. An
-  address with no `Transport` is refused too, as it is neither `udp` nor
-  `tcp`. Every caller in tdns-transport and tdns-mp passes one.
-- The new tests are in `dns_carrier_address_test.go`. The test that
-  "registration never writes a non-DNS address" is one table of
-  registrations, with two cases that come in two steps: the TLSA
-  withdrawn, and the API moved. The two faults are also tested through
-  discovery and its refresh.
-- With the old fallback put back for a check, both of those tests fail, as
-  do the registration cases that bring them about.
-
-## Amendment 2026-10-27: the ping goes over the transport named
-
-The ping row in the tdns-mp table above had the ping operation ask
-`Addressable()`, and its reply name the mechanism that carried the ping.
-`SendPing` cannot say which mechanism that was. tdns-mp #282 does this
-instead, at Johan's request:
-
-- The ping goes over the transport the operator names, and only that one.
-  `peer ping` and `distrib op ping` (DNS, the default) use the DNS carrier.
-  `peer apiping` and `distrib op ping --api` use the API.
-- The other transport is never tried, and the reply names the transport.
-- With one transport named, `Addressable()` does not apply at this site.
-  Over DNS, a peer that offers only the API has no address to ping, and
-  the DNS ping fails without dialling its HTTPS address.
-
-The other three "addressable" sites are as designed. tdns-transport is
-unchanged by this: tdns-mp calls each transport's own `Ping`.
