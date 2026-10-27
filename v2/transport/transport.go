@@ -189,6 +189,13 @@ type TransportError struct {
 	// not take the verb is not a judgment and is not Answered
 	// (verbNotAccepted).
 	Answered bool
+	// NotAccepted is true when the mechanism does not carry the verb: the
+	// endpoint answered that it does not take it (verbNotAccepted), or the
+	// API has no endpoint for it. Nothing judged the message, and the other
+	// mechanism may carry it. The error is retryable and not Answered. It is
+	// no failure to deliver, and SendOn does not count it against the
+	// mechanism.
+	NotAccepted bool
 }
 
 func (e *TransportError) Error() string {
@@ -224,5 +231,19 @@ func NewAnsweredTransportError(transport, op, peerID string, err error) *Transpo
 		Err:       err,
 		Retryable: true,
 		Answered:  true,
+	}
+}
+
+// NewNotAcceptedTransportError is a retryable TransportError for a verb the
+// mechanism does not carry to this peer (NotAccepted). sendWith tries the
+// other mechanism.
+func NewNotAcceptedTransportError(transport, op, peerID string, err error) *TransportError {
+	return &TransportError{
+		Op:          op,
+		Transport:   transport,
+		PeerID:      peerID,
+		Err:         err,
+		Retryable:   true,
+		NotAccepted: true,
 	}
 }

@@ -212,8 +212,8 @@ func (t *APITransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 		// family only on /msg), so TransportManager.Send may fall back to
 		// DNS (it also routes DNS-only verbs to DNS up front; this is the
 		// belt to that brace).
-		return nil, NewTransportError("API", msg.TypeToken, peer.ID,
-			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken), true)
+		return nil, NewNotAcceptedTransportError("API", msg.TypeToken, peer.ID,
+			fmt.Errorf("verb %q is not supported over the API mechanism", msg.TypeToken))
 	}
 	return t.postMsg(ctx, peer, msg)
 }
