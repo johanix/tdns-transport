@@ -374,9 +374,10 @@ func (p *Peer) noteLookup(l DiscoveryLookup) {
 // (SelectTransport, HasMechanism, APIUsable) until discovery finds data
 // that validates: its slot, API's endpoint, DNS's display endpoint. The
 // addresses the DNS carrier dials (CurrentAddress: the relocated one, then
-// the discovered one) go with DNS, and with API only where they are API's
-// own: registration's fallback for a peer that offers no DNS. A peer known
-// from config or a hello keeps the address it was given. The other
+// the discovered one) go with DNS, and with API only each where it is
+// API's address: registration's fallback for a peer that offers no DNS, or
+// a relocate to it. A relocate elsewhere is the peer's own, and a peer
+// known from config or a hello keeps the address it was given. The other
 // mechanism's are kept. It returns the state it had and whether it was past NEEDED; a
 // mechanism that was not keeps its state and gets the reason. When no
 // mechanism is left past NEEDED, the peer's own state follows, from any
@@ -400,12 +401,18 @@ func (p *Peer) demoteMechanism(name, reason string) (PeerState, bool) {
 	case MechanismAPI:
 		p.APIEndpoint = ""
 		// DiscoveryAddr holds the API's address only by registration's
-		// fallback for a peer that offers no DNS: then the DNS carrier has
-		// nothing left to dial, the relocated address included. An address
-		// from DNS discovery, from config or from a hello is the DNS
-		// carrier's own, and stays.
-		if dropped != nil && p.DiscoveryAddr != nil && *p.DiscoveryAddr == *dropped {
-			p.DiscoveryAddr, p.OperationalAddr = nil, nil
+		// fallback for a peer that offers no DNS, and goes with it. A
+		// relocate is the peer's own word on where the DNS carrier dials,
+		// and stays unless it is that address too. An address from DNS
+		// discovery, from config or from a hello is the DNS carrier's own,
+		// and stays.
+		if dropped != nil {
+			if p.DiscoveryAddr != nil && *p.DiscoveryAddr == *dropped {
+				p.DiscoveryAddr = nil
+			}
+			if p.OperationalAddr != nil && *p.OperationalAddr == *dropped {
+				p.OperationalAddr = nil
+			}
 		}
 	case MechanismDNS:
 		p.DNSEndpoint = ""

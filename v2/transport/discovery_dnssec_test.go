@@ -834,3 +834,51 @@ func TestRefusingAPIKeepsAConfiguredCarrierAddress(t *testing.T) {
 		t.Errorf("SelectTransport chose %s, want DNS", got)
 	}
 }
+
+// An API-only peer has the API's address in DiscoveryAddr, by
+// registration's fallback. Refusing API takes that, and leaves a relocate
+// the peer announced: DNS was not refused. A relocate that is the API's
+// address goes with it.
+func TestRefusingAPIKeepsTheRelocateOfAnAPIOnlyPeer(t *testing.T) {
+	apiAddr := Address{Host: "192.0.2.10", Port: 8443, Transport: "https", Path: "/api"}
+	for _, tc := range []struct {
+		name      string
+		relocated Address
+		kept      bool
+	}{
+		{"relocate to a DNS address", Address{Host: "198.51.100.20", Port: 53, Transport: "udp"}, true},
+		{"relocate to the API's address", apiAddr, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := &TransportManager{PeerRegistry: NewPeerRegistry(), APITransport: &APITransport{}, DNSTransport: &DNSTransport{}}
+			peer := tm.PeerRegistry.GetOrCreate(dnssecPeer)
+			fallback, slot, relocated := apiAddr, apiAddr, tc.relocated
+			peer.SetDiscoveryAddress(&fallback)
+			peer.SetMechanismAddress("API", &slot)
+			peer.SetOperationalAddress(&relocated)
+			peer.SetAPIEndpoint("https://api.agent.example.:8443/api")
+			peer.SetMechanismState("API", PeerStateOperational, "hello")
+
+			peer.demoteMechanism("API", "TLSA at _8443._tcp.api.agent.example.: answer insecure")
+			if peer.GetAPIEndpoint() != "" || peer.MechanismAddress("API") != nil {
+				t.Error("the refused API mechanism keeps its endpoint or address")
+			}
+			if peer.DiscoveryAddr != nil {
+				t.Errorf("DiscoveryAddr %+v, the refused API's fallback, is still there", peer.DiscoveryAddr)
+			}
+			a, tr := peer.CurrentAddress(), tm.SelectTransport(peer)
+			if !tc.kept {
+				if a != nil || tr != nil {
+					t.Errorf("CurrentAddress %+v and a transport chosen, want none: the relocate was the refused API's address", a)
+				}
+				return
+			}
+			if a == nil || *a != tc.relocated {
+				t.Errorf("CurrentAddress %+v, want the relocate %+v: refusing API took the peer's own DNS address", a, tc.relocated)
+			}
+			if tr == nil || tr.Name() != "DNS" {
+				t.Errorf("SelectTransport chose %v, want DNS", tr)
+			}
+		})
+	}
+}
