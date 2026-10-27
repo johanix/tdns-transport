@@ -212,7 +212,10 @@ func NewReliableMessageQueue(cfg *ReliableMessageQueueConfig) *ReliableMessageQu
 		expirationTimeout: withDefault(cfg.ExpirationTimeout, 24*time.Hour),
 		processInterval:   withDefault(cfg.ProcessInterval, 1*time.Second),
 		maxQueueSize:      withDefaultInt(cfg.MaxQueueSize, 10000),
-		maxConcurrent:     withDefaultInt(cfg.MaxConcurrentSends, 16),
+		maxConcurrent:     cfg.MaxConcurrentSends,
+	}
+	if q.maxConcurrent <= 0 {
+		q.maxConcurrent = 16 // a negative bound would make no channel at all
 	}
 	q.busy = make(map[string]bool)
 	q.sendSlots = make(chan struct{}, q.maxConcurrent)

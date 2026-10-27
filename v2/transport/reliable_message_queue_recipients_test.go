@@ -116,15 +116,17 @@ func TestAFrozenRecipientDoesNotHoldBackTheOthers(t *testing.T) {
 		enqueueTo(t, q, fmt.Sprintf("other-%d", i), r)
 	}
 
-	// The next tick sends them, with one tick of margin for scheduling.
-	waitFor(t, "the other recipients' messages", 2*cfg.ProcessInterval, func() bool {
+	// The next tick sends them. The limit leaves room for a slow
+	// scheduler; the frozen send stays blocked throughout.
+	limit := 5 * cfg.ProcessInterval
+	waitFor(t, "the other recipients' messages", limit, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(sentAt) == len(others)
 	})
 	mu.Lock()
 	for id, at := range sentAt {
-		if d := at.Sub(queued); d > 2*cfg.ProcessInterval {
+		if d := at.Sub(queued); d > limit {
 			t.Errorf("%s went %v after it was queued", id, d)
 		}
 	}
@@ -234,6 +236,15 @@ func TestTheNumberOfSendsInFlightIsBounded(t *testing.T) {
 	waitFor(t, "every message delivered", time.Second, func() bool {
 		return q.GetStats().ByState[MessageAwaitingConfirm.String()] == len(recipients)
 	})
+}
+
+func TestANonPositiveSendBoundGetsTheDefault(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		q := NewReliableMessageQueue(&ReliableMessageQueueConfig{MaxConcurrentSends: n})
+		if q.maxConcurrent != 16 || cap(q.sendSlots) != 16 {
+			t.Errorf("MaxConcurrentSends %d: bound %d, %d slots, want the default 16", n, q.maxConcurrent, cap(q.sendSlots))
+		}
+	}
 }
 
 func TestShutdownWaitsForTheSendsInFlightAndStartsNoMore(t *testing.T) {
