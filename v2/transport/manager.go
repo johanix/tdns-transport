@@ -345,12 +345,12 @@ type SendOutcome struct {
 // instead of the one SelectTransport picks: an answer goes back the way its
 // request came (tdns-mp #238). When mechanism is not known (""), this
 // manager has no transport for it, or that one does not reach the peer, the
-// first choice is SelectTransport's. The fallback is Send's, with Send's
-// rule: a failure to deliver, or a reply that the endpoint does not take
-// the verb (verbNotAccepted), goes on the other mechanism; a refusal the
-// peer judged (Answered) is returned and the other is not tried. req is
-// sent once, as an answer or a confirmation is: when the other mechanism
-// reaches the peer, the first try gets half of ctx's time.
+// first choice is SelectTransport's. The fallback is Send's, when it
+// reaches the peer, with Send's rule: a failure to deliver, or a reply that
+// the endpoint does not take the verb (verbNotAccepted), goes on the other
+// mechanism; a refusal the peer judged (Answered) is returned and the other
+// is not tried. req is sent once, as an answer or a confirmation is: when
+// there is another mechanism, the first try gets half of ctx's time.
 //
 // A failure to deliver on the first choice is counted against that
 // mechanism (RecordMechanismFailure), and a send it carries clears the
@@ -371,6 +371,11 @@ func (tm *TransportManager) SendOn(ctx context.Context, peer *Peer, mechanism st
 		return nil, SendOutcome{}, fmt.Errorf("SendOn: no usable transport for peer %s (%s)", peer.ID, tm.noTransportReason(peer))
 	}
 	primary, fallback := tm.route(peer, req, primary)
+	// An API with no TLSA to check the peer's certificate against, or a DNS
+	// with no address, is no fallback: there is nothing to try there.
+	if fallback != nil && !reaches(fallback, peer) {
+		fallback = nil
+	}
 	resp, out, err := send(ctx, peer, req, primary, fallback, true)
 	switch {
 	case out.First != "" && out.FirstErr == nil:

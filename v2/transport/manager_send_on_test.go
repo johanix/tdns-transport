@@ -3,8 +3,10 @@ package transport
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -179,6 +181,33 @@ func TestSendOnCountsAFailureToDeliver(t *testing.T) {
 	}
 	if n := peer.MechanismConsecutiveFails(MechanismDNS); n != 0 {
 		t.Errorf("DNS, the fallback, has %d failures counted, want 0", n)
+	}
+}
+
+// A mechanism that does not reach the peer is no fallback: an API endpoint
+// with no TLSA to check the peer's certificate against is not tried when
+// DNS fails, and DNS's failure is counted.
+func TestSendOnNoFallbackThatDoesNotReach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tm, rcv, dnsRcv, peer := sendOnRig(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
+	ln.Close() // nothing listens there: every NOTIFY is refused
+	peer.SetDiscoveryAddress(dead)
+	peer.SetMechanismAddress("DNS", dead)
+	peer.SetMechanismTLSA("API", TLSASet{})
+
+	_, out, err := tm.SendOn(ctx, peer, MechanismDNS, testConfirmRequest())
+	if err == nil || out.First != "DNS" || out.Carrier != "" || strings.Contains(err.Error(), "API: ") {
+		t.Fatalf("DNS refused, the API with no TLSA: outcome %+v, err %v; want DNS failing and the API not tried", out, err)
+	}
+	sent(t, "DNS refused, the API with no TLSA", rcv, dnsRcv, 0, 0)
+	if n := peer.MechanismConsecutiveFails(MechanismDNS); n != 1 {
+		t.Errorf("DNS has %d failures counted, want 1", n)
 	}
 }
 
