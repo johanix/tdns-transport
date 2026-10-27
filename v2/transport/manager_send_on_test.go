@@ -138,8 +138,8 @@ func TestSendOnJudgedRefusalStays(t *testing.T) {
 		if err == nil || !errors.As(err, &te) || !te.Answered {
 			t.Fatalf("%T refused: %v, want an Answered *TransportError", req, err)
 		}
-		if out.First != "API" || out.Carrier != "" || !transportErrorAnswered(out.FirstErr) {
-			t.Errorf("%T refused: outcome %+v, want the API first, Answered, and nothing carrying", req, out)
+		if out.First != "API" || out.Carrier != "" || out.Refuser != "API" || !transportErrorAnswered(out.FirstErr) {
+			t.Errorf("%T refused: outcome %+v, want the API first and refusing, Answered, and nothing carrying", req, out)
 		}
 		if _, isApp := req.(*AppMessage); isApp {
 			if ar, ok := resp.(*AppResponse); !ok || ar.Status != ConfirmFailed || ar.Message != "not authorized" {
@@ -150,6 +150,40 @@ func TestSendOnJudgedRefusalStays(t *testing.T) {
 	}
 	if n := peer.MechanismConsecutiveFails(MechanismAPI); n != 1 {
 		t.Errorf("the API has %d failures counted, want the 1 from before", n)
+	}
+}
+
+// A first choice that fails to deliver, and a fallback whose recipient
+// refuses the message: the outcome names the fallback as the refuser, the
+// fallback's ConfirmFailed response comes back, and only the first's
+// failure is counted.
+func TestSendOnRefusalOnTheFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tm, rcv, dnsRcv, peer := sendOnRig(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
+	ln.Close() // nothing listens there: every NOTIFY is refused
+	peer.SetDiscoveryAddress(dead)
+	peer.SetMechanismAddress("DNS", dead)
+	rcv.refuseWith("not authorized")
+
+	resp, out, err := tm.SendOn(ctx, peer, MechanismDNS, configAnswer())
+	if err == nil {
+		t.Fatal("a refused answer came back without an error")
+	}
+	if out.First != "DNS" || out.FirstErr == nil || out.Carrier != "" || out.Refuser != "API" {
+		t.Fatalf("DNS failing, the API refusing: outcome %+v, want DNS failing and the API refusing", out)
+	}
+	if ar, ok := resp.(*AppResponse); !ok || ar.Status != ConfirmFailed || ar.Message != "not authorized" {
+		t.Errorf("resp %+v, want the API's ConfirmFailed response", resp)
+	}
+	sent(t, "DNS failing, the API refusing", rcv, dnsRcv, 1, 0)
+	if d, a := peer.MechanismConsecutiveFails(MechanismDNS), peer.MechanismConsecutiveFails(MechanismAPI); d != 1 || a != 0 {
+		t.Errorf("counts: DNS %d, API %d; want 1 and 0", d, a)
 	}
 }
 

@@ -334,11 +334,18 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 }
 
 // SendOutcome is how a SendOn went: the mechanism tried first, why that one
-// did not carry the message, and the mechanism that did.
+// did not carry the message, and the mechanism that did, or the one whose
+// recipient refused it.
 type SendOutcome struct {
 	First    string // the mechanism tried first; "" when none was tried
 	FirstErr error  // why First did not carry the message; nil when it did
 	Carrier  string // the mechanism that carried it; "" when none did
+	// Refuser is the mechanism on which the recipient refused the message
+	// (Answered): the first, or the other after the first failed to
+	// deliver. "" when no recipient refused it. The error SendOn returns
+	// after a failure and a refusal names both, and errors.As finds the
+	// first's; Refuser says that the message was judged.
+	Refuser string
 }
 
 // SendOn sends req to peer as Send does, with mechanism's transport first
@@ -349,7 +356,7 @@ type SendOutcome struct {
 // reaches the peer, with Send's rule: a failure to deliver, or a reply that
 // the endpoint does not take the verb (verbNotAccepted), goes on the other
 // mechanism; a refusal the peer judged (Answered) is returned and the other
-// is not tried. req is sent once, as an answer or a confirmation is: when
+// is not tried, and the outcome names the mechanism that was refused. req is sent once, as an answer or a confirmation is: when
 // there is another mechanism, the first try gets half of ctx's time.
 //
 // A failure to deliver on the first choice is counted against that
@@ -594,6 +601,7 @@ func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Tr
 	// TestSendVerbNotAcceptedFallsBack).
 	if !fallsBack(primaryErr) {
 		if transportErrorAnswered(primaryErr) {
+			out.Refuser = primary.Name()
 			slog.Debug("primary transport answered with a refusal, not falling back",
 				"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
 		} else {
@@ -616,6 +624,9 @@ func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Tr
 			peer.RecordMechanismSuccess(out.Carrier)
 		}
 		return resp, out, nil
+	}
+	if transportErrorAnswered(fallbackErr) {
+		out.Refuser = fallback.Name()
 	}
 	// The fallback's error alone would hide why the primary failed.
 	return resp, out, fmt.Errorf("Send: all transports failed for peer %s (%s: %w; %s: %w)",
