@@ -351,6 +351,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	// failed registration leaves the peer as it was.
 	// A mechanism whose data was refused for want of DNSSEC validation is
 	// not usable, whatever it held before (DiscoveryResult.refused).
+	_, apiRefused := result.refused("API")
 	_, dnsRefused := result.refused("DNS")
 	dnsUsable := !dnsRefused && result.DNSUri != "" && len(result.DNSAddresses) > 0
 	if dnsUsable && tm.DNSTransport != nil && tm.DNSTransport.SecureWrapper != nil {
@@ -363,7 +364,9 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 		}
 	}
 
-	if result.APIUri != "" {
+	// A refused mechanism's address is not written back: demoteRefused has
+	// just dropped it, and nothing of its data is used until it validates.
+	if result.APIUri != "" && !apiRefused {
 		parsed, err := url.Parse(result.APIUri)
 		if err != nil {
 			return fmt.Errorf("invalid API URI %q: %w", result.APIUri, err)
@@ -391,7 +394,6 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 				Transport: "https",
 				Path:      parsed.Path,
 			}
-			peer.SetDiscoveryAddress(addr)
 			peer.SetMechanismAddress("API", addr)
 			peer.SetAPIEndpoint(result.APIUri)
 			peer.SetPreferredTransport("API")
@@ -401,7 +403,7 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	}
 
 	// Register DNS transport address (NOT else-if: both can exist)
-	if result.DNSUri != "" {
+	if result.DNSUri != "" && !dnsRefused {
 		parsed, err := url.Parse(result.DNSUri)
 		if err != nil {
 			return fmt.Errorf("invalid DNS URI %q: %w", result.DNSUri, err)
@@ -470,10 +472,20 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	// one the API mechanism is not usable, and HTTPS is not attempted.
 	// The set held must be for the name discovery found: one for another
 	// name vouches for nothing at this endpoint.
-	_, apiRefused := result.refused("API")
 	apiUsable := !apiRefused && result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
 		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
+		// DiscoveryAddr is the slot the DNS carrier dials (SelectTransport
+		// reads it, not the DNS mechanism, as peers known from config or a
+		// hello have no mechanism slots). A peer that offers no DNS gets
+		// API's address there, once the API mechanism is usable. One that
+		// offers DNS does not: with its DNS refused or unresolved, the DNS
+		// carrier would send to the HTTPS endpoint, and API is the way to
+		// reach it. A refused DNS URI comes as no URI, so the refusal is
+		// asked too.
+		if !dnsRefused && result.DNSUri == "" && peer.MechanismAddress(MechanismDNS) == nil {
+			peer.SetDiscoveryAddress(peer.MechanismAddress(MechanismAPI))
+		}
 		peer.SetMechanismContactInfo("API", "complete")
 		// Guarded promotion: do not regress an already-established mechanism.
 		// This is the per-mechanism discovery-phase write the send gates read.
