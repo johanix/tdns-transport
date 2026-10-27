@@ -2,8 +2,8 @@
 
 Date: 2026-10-27. Status: reviewed twice; both decisions settled by
 Johan on 2026-10-27 (the check, and the rename). Implemented in the same
-PR, #42, after #43 and #270 merged (see the amendment at the end). The
-tdns-mp half is not done yet.
+PR, #42, after #43 and #270 merged (see the amendments at the end). The
+tdns-mp half is johanix/tdns-mp#282; the ping is amended there.
 Follows tdns-transport #39. Follow-up: tdns-transport #44. Refs johanix/tdns-mp#260.
 
 ## The problem
@@ -247,3 +247,21 @@ It follows the design. Where the design left details open:
   discovery and its refresh.
 - With the old fallback put back for a check, both of those tests fail, as
   do the registration cases that bring them about.
+
+## Amendment 2026-10-27: the ping goes over the transport named
+
+The ping row in the tdns-mp table above had the ping operation ask
+`Addressable()`, and its reply name the mechanism that carried the ping.
+`SendPing` cannot say which mechanism that was. tdns-mp #282 does this
+instead, at Johan's request:
+
+- The ping goes over the transport the operator names, and only that one.
+  `peer ping` and `distrib op ping` (DNS, the default) use the DNS carrier.
+  `peer apiping` and `distrib op ping --api` use the API.
+- The other transport is never tried, and the reply names the transport.
+- With one transport named, `Addressable()` does not apply at this site.
+  Over DNS, a peer that offers only the API has no address to ping, and
+  the DNS ping fails without dialling its HTTPS address.
+
+The other three "addressable" sites are as designed. tdns-transport is
+unchanged by this: tdns-mp calls each transport's own `Ping`.
