@@ -321,7 +321,7 @@ func (t *APITransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	if resp.Status != ConfirmSuccess {
 		err := fmt.Errorf("recipient refused the confirmation: %s", resp.Message)
 		if verbNotAccepted(resp.Message, VerbConfirm) {
-			return NewTransportError("API", "Confirm", peer.ID, err, true)
+			return NewNotAcceptedTransportError("API", "Confirm", peer.ID, err)
 		}
 		return NewAnsweredTransportError("API", "Confirm", peer.ID, err)
 	}

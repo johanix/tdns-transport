@@ -329,24 +329,98 @@ func (tm *TransportManager) Send(ctx context.Context, peer *Peer, req interface{
 	if primary == nil {
 		return nil, fmt.Errorf("Send: no usable transport for peer %s (%s)", peer.ID, tm.noTransportReason(peer))
 	}
-	// Only the sync family has an API endpoint; every other application
-	// verb is DNS-only. Route those to DNS up front rather than letting
-	// the API primary reject them and relying on the fallback, and give
-	// them no API fallback: API would only refuse the verb.
+	primary, fallback := tm.route(peer, req, primary)
+	return sendWith(ctx, peer, req, primary, fallback)
+}
+
+// SendOutcome is how a SendOn went: the mechanism tried first, why that one
+// did not carry the message, and the mechanism that did, or the one whose
+// recipient refused it.
+type SendOutcome struct {
+	First    string // the mechanism tried first; "" when none was tried
+	FirstErr error  // why First did not carry the message; nil when it did
+	Carrier  string // the mechanism that carried it; "" when none did
+	// Refuser is the mechanism on which the recipient refused the message
+	// (Answered): the first, or the other after the first failed to
+	// deliver. "" when no recipient refused it. The error SendOn returns
+	// after a failure and a refusal names both, and errors.As finds the
+	// first's; Refuser says that the message was judged.
+	Refuser string
+}
+
+// SendOn sends req to peer as Send does, with mechanism's transport first
+// instead of the one SelectTransport picks: an answer goes back the way its
+// request came (tdns-mp #238). When mechanism is not known (""), this
+// manager has no transport for it, or that one does not reach the peer, the
+// first choice is SelectTransport's. The fallback is Send's, when it
+// reaches the peer, with Send's rule: a failure to deliver, or a reply that
+// the endpoint does not take the verb (verbNotAccepted), goes on the other
+// mechanism; a refusal the peer judged (Answered) is returned and the other
+// is not tried, and the outcome names the mechanism that was refused. req is sent once, as an answer or a confirmation is: when
+// there is another mechanism, the first try gets half of ctx's time.
+//
+// A failure to deliver on the first choice is counted against that
+// mechanism (RecordMechanismFailure), so a pair that works one way only
+// shows in the gossip matrix (tdns-mp #236). The mechanism that carries req,
+// the first or the other, has its count cleared (RecordMechanismSuccess). A
+// judged refusal and a verb the mechanism does not carry are answers, not
+// failures to deliver, and are not counted. The outcome says which mechanism
+// carried req, and why the first did not.
+func (tm *TransportManager) SendOn(ctx context.Context, peer *Peer, mechanism string, req interface{}) (interface{}, SendOutcome, error) {
+	if peer == nil {
+		return nil, SendOutcome{}, fmt.Errorf("SendOn: peer is nil")
+	}
+	primary := tm.transportFor(mechanism)
+	if primary == nil || !reaches(primary, peer) {
+		primary = tm.SelectTransport(peer)
+	}
+	if primary == nil {
+		return nil, SendOutcome{}, fmt.Errorf("SendOn: no usable transport for peer %s (%s)", peer.ID, tm.noTransportReason(peer))
+	}
+	primary, fallback := tm.route(peer, req, primary)
+	// An API with no TLSA to check the peer's certificate against, or a DNS
+	// with no address, is no fallback: there is nothing to try there.
+	if fallback != nil && !reaches(fallback, peer) {
+		fallback = nil
+	}
+	return send(ctx, peer, req, primary, fallback, true)
+}
+
+// transportFor is this manager's transport for mechanism, nil when it has
+// none.
+func (tm *TransportManager) transportFor(mechanism string) Transport {
+	switch mechanism {
+	case MechanismAPI:
+		if tm.APITransport != nil {
+			return tm.APITransport
+		}
+	case MechanismDNS:
+		if tm.DNSTransport != nil {
+			return tm.DNSTransport
+		}
+	}
+	return nil
+}
+
+// route is the primary and the fallback for req when primary is the first
+// choice. The fallback is the one that isn't the primary. Only the sync
+// family has an API endpoint; every other application verb is DNS-only.
+// Those go to DNS up front rather than letting the API primary reject them
+// and relying on the fallback, and get no API fallback: API would only
+// refuse the verb.
+func (tm *TransportManager) route(peer *Peer, req interface{}, primary Transport) (Transport, Transport) {
 	am, isApp := req.(*AppMessage)
 	dnsOnly := isApp && am != nil && !isSyncFamily(am.TypeToken)
 	if dnsOnly && primary == tm.APITransport && tm.DNSTransport != nil && peer.HasMechanism("DNS") {
 		primary = tm.DNSTransport
 	}
-
-	// The fallback is the one that isn't the primary.
 	var fallback Transport
 	if primary == tm.APITransport && tm.DNSTransport != nil {
 		fallback = tm.DNSTransport
 	} else if primary == tm.DNSTransport && tm.APITransport != nil && !dnsOnly {
 		fallback = tm.APITransport
 	}
-	return sendWith(ctx, peer, req, primary, fallback)
+	return primary, fallback
 }
 
 // Confirm sends a confirmation to peer as Send sends a message: on the
@@ -410,10 +484,45 @@ func (tm *TransportManager) noTransportReason(peer *Peer) string {
 // (fallback nil: there is none). It is separate from the manager's
 // concrete transport fields so that tests can inject fakes.
 func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallback Transport) (interface{}, error) {
-	var dispatch func(t Transport) (interface{}, error)
+	resp, _, err := send(ctx, peer, req, primary, fallback, false)
+	return resp, err
+}
+
+// fallsBack reports whether a primary that failed with err leaves the
+// message to the fallback: not after a non-retryable error, which would hit
+// the other transport identically, and not after an Answered refusal, which
+// the recipient would give again. Errors not wrapped in *TransportError fall
+// back (a safe default for unaudited code paths).
+func fallsBack(err error) bool {
+	var te *TransportError
+	return !errors.As(err, &te) || (te.Retryable && !te.Answered)
+}
+
+// undelivered reports whether err is a failure to deliver on the
+// mechanism: one that falls back, other than a verb the mechanism does not
+// carry (NotAccepted).
+func undelivered(err error) bool {
+	if err == nil || !fallsBack(err) {
+		return false
+	}
+	var te *TransportError
+	return !errors.As(err, &te) || !te.NotAccepted
+}
+
+// send is sendWith, with the outcome; sendOn makes it SendOn's. A message
+// sent once (SendOn's; a confirmation always is) leaves the fallback time:
+// when the fallback can reach the peer, the primary gets half the time left,
+// so that a peer that hangs on it leaves the fallback the other half.
+// SendOn's send keeps the mechanisms' counts as it goes: the primary's
+// failure to deliver is counted before the fallback is tried, so the count
+// stands by the time the message lands.
+func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Transport, sendOn bool) (interface{}, SendOutcome, error) {
+	var out SendOutcome
+	once := sendOn
+	var dispatch func(ctx context.Context, t Transport) (interface{}, error)
 	switch r := req.(type) {
 	case *AppMessage:
-		dispatch = func(t Transport) (interface{}, error) {
+		dispatch = func(ctx context.Context, t Transport) (interface{}, error) {
 			resp, err := t.SendApp(ctx, peer, r)
 			if err != nil {
 				return nil, err
@@ -429,29 +538,19 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 			if resp.Status == ConfirmFailed && isSyncFamily(r.TypeToken) {
 				err := fmt.Errorf("recipient rejected %s: %s", r.TypeToken, resp.Message)
 				if verbNotAccepted(resp.Message, r.TypeToken) {
-					return resp, NewTransportError(t.Name(), r.TypeToken, peer.ID, err, true)
+					return resp, NewNotAcceptedTransportError(t.Name(), r.TypeToken, peer.ID, err)
 				}
 				return resp, NewAnsweredTransportError(t.Name(), r.TypeToken, peer.ID, err)
 			}
 			return resp, nil
 		}
 	case *ConfirmRequest:
-		first := fallback != nil && reaches(fallback, peer)
-		dispatch = func(t Transport) (interface{}, error) {
-			// A confirmation is sent once. When the fallback can reach the
-			// peer, the primary gets half the time left, so that a peer
-			// that hangs on it leaves the fallback the other half.
-			actx := ctx
-			if first {
-				first = false
-				var cancel context.CancelFunc
-				actx, cancel = halfOfDeadline(ctx)
-				defer cancel()
-			}
-			return nil, t.Confirm(actx, peer, r)
+		once = true
+		dispatch = func(ctx context.Context, t Transport) (interface{}, error) {
+			return nil, t.Confirm(ctx, peer, r)
 		}
 	case *PingRequest:
-		dispatch = func(t Transport) (interface{}, error) {
+		dispatch = func(ctx context.Context, t Transport) (interface{}, error) {
 			resp, err := t.Ping(ctx, peer, r)
 			if err != nil {
 				return nil, err
@@ -465,12 +564,26 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 			return resp, nil
 		}
 	default:
-		return nil, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
+		return nil, out, fmt.Errorf("Send: unsupported message type %T (use SendAll for hello/beat fan-out)", req)
 	}
 
-	resp, primaryErr := dispatch(primary)
+	out.First = primary.Name()
+	pctx, cancel := ctx, context.CancelFunc(func() {})
+	if once && fallback != nil && reaches(fallback, peer) {
+		pctx, cancel = halfOfDeadline(ctx)
+	}
+	resp, primaryErr := dispatch(pctx, primary)
+	cancel()
 	if primaryErr == nil {
-		return resp, nil
+		out.Carrier = primary.Name()
+		if sendOn {
+			peer.RecordMechanismSuccess(out.Carrier)
+		}
+		return resp, out, nil
+	}
+	out.FirstErr = primaryErr
+	if sendOn && undelivered(primaryErr) {
+		peer.RecordMechanismFailure(out.First)
 	}
 	// Don't fall back on non-retryable errors. The same problem
 	// (e.g. missing crypto key, no address, marshal failure) will
@@ -486,31 +599,45 @@ func sendWith(ctx context.Context, peer *Peer, req interface{}, primary, fallbac
 	// it over DNS (tdns-transport #36;
 	// TestManagerConfirmPrefersAPIFallsBackToDNS,
 	// TestSendVerbNotAcceptedFallsBack).
-	var te *TransportError
-	if errors.As(primaryErr, &te) && (!te.Retryable || te.Answered) {
-		if te.Answered {
+	if !fallsBack(primaryErr) {
+		if transportErrorAnswered(primaryErr) {
+			out.Refuser = primary.Name()
 			slog.Debug("primary transport answered with a refusal, not falling back",
 				"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
 		} else {
 			slog.Debug("primary transport failed with non-retryable error, not falling back",
 				"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
 		}
-		return resp, primaryErr
+		return resp, out, primaryErr
 	}
 	if fallback == nil {
-		return nil, fmt.Errorf("Send: all transports failed for peer %s (%s: %w)",
+		return nil, out, fmt.Errorf("Send: all transports failed for peer %s (%s: %w)",
 			peer.ID, primary.Name(), primaryErr)
 	}
 	slog.Debug("primary transport failed, trying fallback",
 		"transport", primary.Name(), "peer", peer.ID, "err", primaryErr)
 
-	resp, fallbackErr := dispatch(fallback)
+	resp, fallbackErr := dispatch(ctx, fallback)
 	if fallbackErr == nil {
-		return resp, nil
+		out.Carrier = fallback.Name()
+		if sendOn {
+			peer.RecordMechanismSuccess(out.Carrier)
+		}
+		return resp, out, nil
+	}
+	if transportErrorAnswered(fallbackErr) {
+		out.Refuser = fallback.Name()
 	}
 	// The fallback's error alone would hide why the primary failed.
-	return resp, fmt.Errorf("Send: all transports failed for peer %s (%s: %w; %s: %w)",
+	return resp, out, fmt.Errorf("Send: all transports failed for peer %s (%s: %w; %s: %w)",
 		peer.ID, primary.Name(), primaryErr, fallback.Name(), fallbackErr)
+}
+
+// transportErrorAnswered reports whether err is a TransportError whose
+// recipient answered with a refusal (Answered).
+func transportErrorAnswered(err error) bool {
+	var te *TransportError
+	return errors.As(err, &te) && te.Answered
 }
 
 // GetQueueStats returns RMQ statistics.
