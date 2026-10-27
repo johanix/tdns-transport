@@ -18,6 +18,10 @@
  * recipient (MarkPending) starts the wait over. Recipients are idempotent
  * per distribution ID, so a repeat costs at worst an extra confirmation.
  *
+ * Each recipient gets its messages one at a time, in the order they were
+ * queued, while different recipients are sent to at the same time: a
+ * recipient that does not answer holds back only its own messages.
+ *
  * See tdns/docs/reliable-message-delivery-architecture.md for full design.
  */
 package transport
@@ -28,6 +32,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
@@ -88,6 +93,7 @@ type pendingMessage struct {
 	LastAttempt  time.Time
 	NextAttempt  time.Time // Scheduled time for next delivery attempt
 	LastError    string
+	seq          uint64 // Enqueue order: a recipient's messages go out in this order
 }
 
 // QueueStats provides visibility into the queue's current state.
@@ -132,7 +138,8 @@ func pendingKey(distID string, recipientID string) string {
 // Messages are accepted immediately via Enqueue() regardless of recipient state.
 // A background worker periodically processes the queue:
 //   - Checks if recipient is ready before attempting delivery
-//   - Sends via the configured sendFunc
+//   - Sends via the configured sendFunc, to each recipient on a goroutine
+//     of its own, one message at a time in the order they were queued
 //   - Retries with exponential backoff on failure
 //   - Waits for the recipient's final confirmation (MarkConfirmed) and
 //     sends the message again when the wait runs out
@@ -152,6 +159,16 @@ type ReliableMessageQueue struct {
 	// Returns nil on successful send (message is now awaiting confirmation).
 	sendFunc func(ctx context.Context, msg *OutgoingMessage) error
 
+	// A recipient's due messages go out as one batch on a goroutine of
+	// its own (deliverBatch). busy holds the recipients with a batch in
+	// flight: their next messages wait for it, so none overtakes another.
+	// The key is the recipient; per-(recipient, scope) streams (#10)
+	// would key it finer.
+	busy      map[string]bool
+	sendSlots chan struct{}  // One per batch in flight, at most maxConcurrent
+	senders   sync.WaitGroup // The batches in flight; Start waits for them
+	nextSeq   uint64         // Last enqueue sequence number handed out
+
 	// Statistics
 	totalDelivered int
 	totalResent    int
@@ -166,18 +183,20 @@ type ReliableMessageQueue struct {
 	expirationTimeout time.Duration // How long to keep retrying (default: 24h)
 	processInterval   time.Duration // How often to process the queue (default: 1s)
 	maxQueueSize      int           // Maximum number of pending messages (default: 10000)
+	maxConcurrent     int           // Recipients sent to at the same time (default: 16)
 }
 
 // ReliableMessageQueueConfig holds configuration for creating a queue.
 type ReliableMessageQueueConfig struct {
-	IsRecipientReady  func(recipientID string) bool
-	BaseBackoff       time.Duration // Default: 2s
-	MaxBackoff        time.Duration // Default: 60s
-	ConfirmTimeout    time.Duration // Default: 2m; the wait for a final confirmation before a resend
-	MaxConfirmWait    time.Duration // Default: 15m; the cap on that wait as it doubles
-	ExpirationTimeout time.Duration // Default: 24h
-	ProcessInterval   time.Duration // Default: 1s
-	MaxQueueSize      int           // Default: 10000
+	IsRecipientReady   func(recipientID string) bool
+	BaseBackoff        time.Duration // Default: 2s
+	MaxBackoff         time.Duration // Default: 60s
+	ConfirmTimeout     time.Duration // Default: 2m; the wait for a final confirmation before a resend
+	MaxConfirmWait     time.Duration // Default: 15m; the cap on that wait as it doubles
+	ExpirationTimeout  time.Duration // Default: 24h
+	ProcessInterval    time.Duration // Default: 1s
+	MaxQueueSize       int           // Default: 10000
+	MaxConcurrentSends int           // Default: 16; recipients sent to at the same time
 }
 
 // NewReliableMessageQueue creates a new queue with the given configuration.
@@ -193,7 +212,10 @@ func NewReliableMessageQueue(cfg *ReliableMessageQueueConfig) *ReliableMessageQu
 		expirationTimeout: withDefault(cfg.ExpirationTimeout, 24*time.Hour),
 		processInterval:   withDefault(cfg.ProcessInterval, 1*time.Second),
 		maxQueueSize:      withDefaultInt(cfg.MaxQueueSize, 10000),
+		maxConcurrent:     withDefaultInt(cfg.MaxConcurrentSends, 16),
 	}
+	q.busy = make(map[string]bool)
+	q.sendSlots = make(chan struct{}, q.maxConcurrent)
 
 	return q
 }
@@ -210,7 +232,7 @@ func (q *ReliableMessageQueue) Start(ctx context.Context) {
 		slog.Warn("reliable queue started without sendFunc, messages will not be delivered")
 	}
 
-	slog.Info("reliable queue starting", "baseBackoff", q.baseBackoff, "maxBackoff", q.maxBackoff, "confirmTimeout", q.confirmTimeout, "maxConfirmWait", q.maxConfirmWait, "expiration", q.expirationTimeout, "interval", q.processInterval)
+	slog.Info("reliable queue starting", "baseBackoff", q.baseBackoff, "maxBackoff", q.maxBackoff, "confirmTimeout", q.confirmTimeout, "maxConfirmWait", q.maxConfirmWait, "expiration", q.expirationTimeout, "interval", q.processInterval, "maxConcurrentSends", q.maxConcurrent)
 
 	ticker := time.NewTicker(q.processInterval)
 	defer ticker.Stop()
@@ -222,6 +244,9 @@ func (q *ReliableMessageQueue) Start(ctx context.Context) {
 			remaining := len(q.pending)
 			q.mu.RUnlock()
 			slog.Info("reliable queue shutting down", "pending", remaining)
+			// The sends in flight have the same context: wait for them
+			// to return, so that none outlives the queue.
+			q.senders.Wait()
 			return
 
 		case <-ticker.C:
@@ -269,10 +294,12 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 		return fmt.Errorf("duplicate distribution ID: %s for recipient %s", msg.DistributionID, msg.RecipientID)
 	}
 
+	q.nextSeq++
 	pending := &pendingMessage{
 		Message:     msg,
 		State:       MessageQueued,
 		NextAttempt: time.Now(), // Try immediately
+		seq:         q.nextSeq,
 	}
 
 	q.pending[key] = pending
@@ -404,11 +431,16 @@ func (q *ReliableMessageQueue) GetPendingMessages() []PendingMessageInfo {
 }
 
 // processQueue is called periodically to attempt delivery of pending messages.
+// Each recipient's due messages go out as one batch on a goroutine of its
+// own (deliverBatch), so a recipient that does not answer holds back only
+// its own messages. A recipient whose last batch is still in flight gets
+// no new one until that batch is done.
 func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 
 	now := time.Now()
-	var toSend []*pendingMessage
+	due := make(map[string][]*pendingMessage) // by recipient
 	var toRemove []string
 
 	for key, pending := range q.pending {
@@ -430,6 +462,12 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 			continue
 		}
 
+		// The recipient's earlier messages are still going out: this
+		// one goes after them.
+		if q.busy[pending.Message.RecipientID] {
+			continue
+		}
+
 		// Check if recipient is reachable
 		if !q.isRecipientReady(pending.Message.RecipientID) {
 			// Log on first deferral to aid debugging
@@ -441,16 +479,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 			continue
 		}
 
-		// Ready to send. A delivered message whose final confirmation
-		// did not come within its wait goes again, same ID and nonce.
-		if pending.State == MessageAwaitingConfirm {
-			pending.Resends++
-			q.totalResent++
-			slog.Info("no final confirmation, sending again", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "zone", pending.Message.Zone, "resend", pending.Resends, "age", now.Sub(pending.Message.CreatedAt).Round(time.Second))
-		}
-		toSend = append(toSend, pending)
-		pending.State = MessageSending
-		pending.HeardPending = false
+		due[pending.Message.RecipientID] = append(due[pending.Message.RecipientID], pending)
 	}
 
 	// Remove expired messages
@@ -458,12 +487,64 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 		delete(q.pending, key)
 	}
 
-	q.mu.Unlock()
+	// Each recipient's messages in the order they were queued, and the
+	// recipient whose oldest message has waited longest first, in case
+	// the send slots run short.
+	batches := make([][]*pendingMessage, 0, len(due))
+	for _, batch := range due {
+		sort.Slice(batch, func(i, j int) bool { return batch[i].seq < batch[j].seq })
+		batches = append(batches, batch)
+	}
+	sort.Slice(batches, func(i, j int) bool { return batches[i][0].seq < batches[j][0].seq })
 
-	// Send messages outside the lock
-	for _, pending := range toSend {
+	for _, batch := range batches {
+		select {
+		case q.sendSlots <- struct{}{}:
+		default:
+			// Every slot is taken: the rest waits for a later tick.
+			return
+		}
+		for _, pending := range batch {
+			// Ready to send. A delivered message whose final confirmation
+			// did not come within its wait goes again, same ID and nonce.
+			if pending.State == MessageAwaitingConfirm {
+				pending.Resends++
+				q.totalResent++
+				slog.Info("no final confirmation, sending again", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "zone", pending.Message.Zone, "resend", pending.Resends, "age", now.Sub(pending.Message.CreatedAt).Round(time.Second))
+			}
+			pending.State = MessageSending
+			pending.HeardPending = false
+		}
+		recipient := batch[0].Message.RecipientID
+		q.busy[recipient] = true
+		q.senders.Add(1)
+		go q.deliverBatch(ctx, recipient, batch)
+	}
+}
+
+// deliverBatch sends one recipient's due messages, one at a time in the
+// order they were queued, then frees the recipient for its next batch and
+// gives back the send slot processQueue took for it.
+func (q *ReliableMessageQueue) deliverBatch(ctx context.Context, recipient string, batch []*pendingMessage) {
+	defer q.senders.Done()
+
+	for i, pending := range batch {
+		if ctx.Err() != nil {
+			// Shutting down: the rest is not sent, and stays queued.
+			q.mu.Lock()
+			for _, p := range batch[i:] {
+				p.State = MessageQueued
+			}
+			q.mu.Unlock()
+			break
+		}
 		q.attemptDelivery(ctx, pending)
 	}
+
+	q.mu.Lock()
+	delete(q.busy, recipient)
+	q.mu.Unlock()
+	<-q.sendSlots
 }
 
 // isRecipientReady checks if the recipient is ready to receive messages.
@@ -477,6 +558,16 @@ func (q *ReliableMessageQueue) isRecipientReady(recipientID string) bool {
 // attemptDelivery tries to send a message and handles the result.
 func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pendingMessage) {
 	msg := pending.Message
+	key := pendingKey(msg.DistributionID, msg.RecipientID)
+
+	// A message confirmed or expired while it waited behind the
+	// recipient's earlier messages is no longer ours to send.
+	q.mu.RLock()
+	ours := q.pending[key] == pending
+	q.mu.RUnlock()
+	if !ours {
+		return
+	}
 
 	if q.sendFunc == nil {
 		q.mu.Lock()
@@ -495,7 +586,7 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *pen
 	// The recipient's final confirmation can arrive while the send is in
 	// flight (MarkConfirmed removed the entry), and so can the expiry.
 	// Either way the message is no longer ours to schedule.
-	if q.pending[pendingKey(msg.DistributionID, msg.RecipientID)] != pending {
+	if q.pending[key] != pending {
 		return
 	}
 
