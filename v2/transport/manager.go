@@ -354,12 +354,11 @@ type SendOutcome struct {
 //
 // A failure to deliver on the first choice is counted against that
 // mechanism (RecordMechanismFailure), so a pair that works one way only
-// shows in the gossip matrix (tdns-mp #236). The mechanism that carries
-// req, the first or the other, has its count cleared
-// (RecordMechanismSuccess). A judged refusal and a verb the
-// mechanism does not carry are answers, not failures to deliver, and are
-// not counted. The outcome says which mechanism carried req, and why the
-// first did not.
+// shows in the gossip matrix (tdns-mp #236). The mechanism that carries req,
+// the first or the other, has its count cleared (RecordMechanismSuccess). A
+// judged refusal and a verb the mechanism does not carry are answers, not
+// failures to deliver, and are not counted. The outcome says which mechanism
+// carried req, and why the first did not.
 func (tm *TransportManager) SendOn(ctx context.Context, peer *Peer, mechanism string, req interface{}) (interface{}, SendOutcome, error) {
 	if peer == nil {
 		return nil, SendOutcome{}, fmt.Errorf("SendOn: peer is nil")
@@ -377,14 +376,7 @@ func (tm *TransportManager) SendOn(ctx context.Context, peer *Peer, mechanism st
 	if fallback != nil && !reaches(fallback, peer) {
 		fallback = nil
 	}
-	resp, out, err := send(ctx, peer, req, primary, fallback, true)
-	if undelivered(out.FirstErr) {
-		peer.RecordMechanismFailure(out.First)
-	}
-	if out.Carrier != "" {
-		peer.RecordMechanismSuccess(out.Carrier)
-	}
-	return resp, out, err
+	return send(ctx, peer, req, primary, fallback, true)
 }
 
 // transportFor is this manager's transport for mechanism, nil when it has
@@ -510,12 +502,16 @@ func undelivered(err error) bool {
 	return !errors.As(err, &te) || !te.NotAccepted
 }
 
-// send is sendWith, with the outcome. A message sent once (once: an answer;
-// a confirmation always is) leaves the fallback time: when the fallback can
-// reach the peer, the primary gets half the time left, so that a peer that
-// hangs on it leaves the fallback the other half.
-func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Transport, once bool) (interface{}, SendOutcome, error) {
+// send is sendWith, with the outcome; sendOn makes it SendOn's. A message
+// sent once (SendOn's; a confirmation always is) leaves the fallback time:
+// when the fallback can reach the peer, the primary gets half the time left,
+// so that a peer that hangs on it leaves the fallback the other half.
+// SendOn's send keeps the mechanisms' counts as it goes: the primary's
+// failure to deliver is counted before the fallback is tried, so the count
+// stands by the time the message lands.
+func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Transport, sendOn bool) (interface{}, SendOutcome, error) {
 	var out SendOutcome
+	once := sendOn
 	var dispatch func(ctx context.Context, t Transport) (interface{}, error)
 	switch r := req.(type) {
 	case *AppMessage:
@@ -573,9 +569,15 @@ func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Tr
 	cancel()
 	if primaryErr == nil {
 		out.Carrier = primary.Name()
+		if sendOn {
+			peer.RecordMechanismSuccess(out.Carrier)
+		}
 		return resp, out, nil
 	}
 	out.FirstErr = primaryErr
+	if sendOn && undelivered(primaryErr) {
+		peer.RecordMechanismFailure(out.First)
+	}
 	// Don't fall back on non-retryable errors. The same problem
 	// (e.g. missing crypto key, no address, marshal failure) will
 	// hit the alternate transport identically — falling back just
@@ -610,6 +612,9 @@ func send(ctx context.Context, peer *Peer, req interface{}, primary, fallback Tr
 	resp, fallbackErr := dispatch(ctx, fallback)
 	if fallbackErr == nil {
 		out.Carrier = fallback.Name()
+		if sendOn {
+			peer.RecordMechanismSuccess(out.Carrier)
+		}
 		return resp, out, nil
 	}
 	// The fallback's error alone would hide why the primary failed.
