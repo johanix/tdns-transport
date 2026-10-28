@@ -197,7 +197,7 @@ func TestAPIConfirmPostsTheDNSConfirmPayload(t *testing.T) {
 	// The DNS mechanism's NOTIFY carries the golden bytes.
 	dnsRcv := newDNSChunkReceiver(t)
 	dnsPeer := NewPeer("b.example.")
-	dnsPeer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, dnsPeer, dnsRcv.addr)
 	dt := NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second})
 	if err := dt.Confirm(ctx, dnsPeer, testConfirmRequest()); err != nil {
 		t.Fatalf("DNS Confirm: %v", err)
@@ -306,7 +306,7 @@ func TestManagerJudgedConfirmDoesNotFallBack(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(rcv.srv)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
 	for i, judged := range []string{
@@ -345,7 +345,7 @@ func TestManagerConfirmPrefersAPIFallsBackToDNS(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(rcv.srv)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
 	// The API takes it; DNS is not tried.
@@ -403,7 +403,7 @@ func TestManagerConfirmHangingAPILeavesDNSTime(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(hanging)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -440,7 +440,7 @@ func TestManagerConfirmDNSOnlyPeerKeepsAllItsTime(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 3 * time.Second}),
 	}
 	peer := NewPeer("b.example.")
-	peer.SetDiscoveryAddress(&Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
+	setDNSCarrier(t, peer, &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

@@ -428,13 +428,15 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 				Transport: "udp",
 			}
 
-			// DiscoveryAddr is the slot the DNS carrier dials; when both
-			// mechanisms resolve it holds the DNS address (API sends dial
-			// the API slot, with APIEndpoint's name for TLS). The
-			// per-mechanism slot keeps each address.
+			// DNSCarrierAddr is the slot the DNS carrier dials, and holds
+			// only DNS addresses (API sends dial the API slot, with
+			// APIEndpoint's name for TLS). The per-mechanism slot keeps
+			// each address.
 			// API stays the preferred transport when it also resolved,
 			// matching Peer.PreferredMechanism and SelectTransport's default.
-			peer.SetDiscoveryAddress(addr)
+			if err := peer.SetDNSCarrierAddress(addr); err != nil {
+				return fmt.Errorf("DNS address for %s: %w", result.Identity, err)
+			}
 			peer.SetMechanismAddress("DNS", addr)
 			peer.SetDNSEndpoint(result.DNSUri) // display/diagnostics (S2)
 			peer.setPreferredTransportIfUnset("DNS")
@@ -475,17 +477,9 @@ func (tm *TransportManager) RegisterDiscoveredPeer(result *DiscoveryResult) (err
 	apiUsable := !apiRefused && result.APIUri != "" && len(result.APIAddresses) > 0 && peer.HasMechanismTLSA("API") &&
 		peer.MechanismTLSA("API").Owner == result.TLSA.Owner
 	if apiUsable {
-		// DiscoveryAddr is the slot the DNS carrier dials (SelectTransport
-		// reads it, not the DNS mechanism, as peers known from config or a
-		// hello have no mechanism slots). A peer that offers no DNS gets
-		// API's address there, once the API mechanism is usable. One that
-		// offers DNS does not: with its DNS refused or unresolved, the DNS
-		// carrier would send to the HTTPS endpoint, and API is the way to
-		// reach it. A refused DNS URI comes as no URI, so the refusal is
-		// asked too.
-		if !dnsRefused && result.DNSUri == "" && peer.MechanismAddress(MechanismDNS) == nil {
-			peer.SetDiscoveryAddress(peer.MechanismAddress(MechanismAPI))
-		}
+		// The API's address stays in its own slot: the DNS carrier never
+		// dials it. A peer that offers only the API has no DNS carrier
+		// address, and Addressable says it can be reached.
 		peer.SetMechanismContactInfo("API", "complete")
 		// Guarded promotion: do not regress an already-established mechanism.
 		// This is the per-mechanism discovery-phase write the send gates read.

@@ -105,8 +105,8 @@ func apiURL(peer *Peer, path string) (string, error) {
 	endpoint := peer.GetAPIEndpoint()
 	if endpoint == "" {
 		// API transport requires an explicit HTTPS endpoint. Falling
-		// back to peer.CurrentAddress() (a DNS endpoint for DNS-only
-		// peers) would produce structurally invalid HTTP URLs like
+		// back to peer.DNSCarrierAddress() (a DNS address, never an
+		// HTTPS one) would produce structurally invalid HTTP URLs like
 		// "udp://host:53/sync" — guaranteed to fail with
 		// "unsupported protocol scheme udp". Refusing here gives
 		// callers a clear error instead.

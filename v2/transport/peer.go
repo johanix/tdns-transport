@@ -72,12 +72,15 @@ type Peer struct {
 	StateReason  string    // Reason for current state
 	StateChanged time.Time // When state last changed
 
-	// Addresses
-	DiscoveryAddr   *Address // Address discovered via DNS (URI/SVCB records)
-	OperationalAddr *Address // Private address from Relocate (for DDoS mitigation)
+	// Addresses. DNSCarrierAddr and OperationalAddr hold only addresses the
+	// DNS carrier dials (udp or tcp, no path): their setters refuse any
+	// other. The API's address lives in Mechanisms["API"].Address, with
+	// APIEndpoint, and only the HTTPS mechanism dials it.
+	DNSCarrierAddr  *Address // DNS carrier's address: from config, a static peer, or discovery's DNS leg
+	OperationalAddr *Address // DNS carrier's address from a Relocate (for DDoS mitigation); dialled first
 	APIEndpoint     string   // Full URL for API transport (when available)
 	DNSEndpoint     string   // Full dns:// URL for DNS transport (display/diagnostics;
-	//                          the resolved IP lives in DiscoveryAddr/Mechanisms["DNS"].Address)
+	//                          the resolved IP lives in DNSCarrierAddr/Mechanisms["DNS"].Address)
 
 	// Cryptographic identity
 	LongTermPubKey crypto.PublicKey // Peer's long-term public key
@@ -348,9 +351,9 @@ func timeSinceOrInf(t time.Time) time.Duration {
 }
 
 // SetMechanismAddress records the resolved address of one mechanism
-// ("API", "DNS"). Discovery writes it next to DiscoveryAddr: DiscoveryAddr
-// is the single slot the DNS carrier dials (CurrentAddress), while the
-// per-mechanism slot is what HasMechanism and PreferredMechanism read, so
+// ("API", "DNS"). Discovery's DNS leg writes it next to DNSCarrierAddr:
+// DNSCarrierAddr is the slot the DNS carrier dials (DNSCarrierAddress), while
+// the per-mechanism slot is what HasMechanism and PreferredMechanism read, so
 // a mechanism whose address was discovered but never stored here would
 // look absent. The HTTPS mechanism dials the API slot (MechanismAddress).
 func (p *Peer) SetMechanismAddress(name string, addr *Address) {
@@ -798,30 +801,68 @@ func (p *Peer) SetLivenessInterval(seconds uint32) {
 	p.LivenessInterval = seconds
 }
 
-// CurrentAddress returns the address to use for communication.
-// Prefers OperationalAddr if available (post-Relocate), falls back to DiscoveryAddr.
-func (p *Peer) CurrentAddress() *Address {
+// DNSCarrierAddress returns the address the DNS carrier dials: the one from
+// a Relocate (OperationalAddr) if there is one, else DNSCarrierAddr. It is
+// nil for a peer that offers only the API. Whether there is anywhere at all
+// to send to the peer is Addressable.
+func (p *Peer) DNSCarrierAddress() *Address {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	if p.OperationalAddr != nil {
 		return p.OperationalAddr
 	}
-	return p.DiscoveryAddr
+	return p.DNSCarrierAddr
 }
 
-// SetDiscoveryAddress sets the address discovered via DNS.
-func (p *Peer) SetDiscoveryAddress(addr *Address) {
+// Addressable reports whether there is somewhere to send to the peer: an
+// address for the DNS carrier, or a usable API. It takes no lock of its
+// own, as both calls take p.mu and a second read lock can deadlock behind
+// a waiting writer; so the answer is not atomic.
+func (p *Peer) Addressable() bool {
+	return p.DNSCarrierAddress() != nil || p.APIUsable()
+}
+
+// checkDNSCarrierAddress refuses an address the DNS carrier does not dial:
+// one whose transport is not udp or tcp, or that has a path (an HTTPS
+// address, say). nil, which clears a slot, passes.
+func checkDNSCarrierAddress(addr *Address) error {
+	if addr == nil {
+		return nil
+	}
+	if addr.Transport != "udp" && addr.Transport != "tcp" {
+		return fmt.Errorf("address %s has transport %q: the DNS carrier dials only udp or tcp", addr, addr.Transport)
+	}
+	if addr.Path != "" {
+		return fmt.Errorf("address %s has a path: the DNS carrier dials none", addr)
+	}
+	return nil
+}
+
+// SetDNSCarrierAddress sets the address the DNS carrier dials, from config,
+// a static peer or discovery's DNS leg. An address the DNS carrier does not
+// dial is refused with an error, and the slot keeps what it had.
+func (p *Peer) SetDNSCarrierAddress(addr *Address) error {
+	if err := checkDNSCarrierAddress(addr); err != nil {
+		return fmt.Errorf("peer %s: %w", p.ID, err)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.DiscoveryAddr = addr
+	p.DNSCarrierAddr = addr
+	return nil
 }
 
-// SetOperationalAddress sets the operational address (from Relocate).
-func (p *Peer) SetOperationalAddress(addr *Address) {
+// SetOperationalAddress sets the address from a Relocate, which the DNS
+// carrier dials before DNSCarrierAddr. An address the DNS carrier does not
+// dial is refused with an error, and the slot keeps what it had.
+func (p *Peer) SetOperationalAddress(addr *Address) error {
+	if err := checkDNSCarrierAddress(addr); err != nil {
+		return fmt.Errorf("peer %s: %w", p.ID, err)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.OperationalAddr = addr
+	return nil
 }
 
 // SetAPIEndpoint records the URL of the peer's API transport.

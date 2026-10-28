@@ -242,7 +242,7 @@ func (tm *TransportManager) SelectTransport(peer *Peer) Transport {
 	apiUsable := tm.APITransport != nil && peer.APIUsable()
 	switch peer.GetPreferredTransport() {
 	case "DNS":
-		if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		if tm.DNSTransport != nil && peer.DNSCarrierAddress() != nil {
 			return tm.DNSTransport
 		}
 	case "API":
@@ -255,7 +255,7 @@ func (tm *TransportManager) SelectTransport(peer *Peer) Transport {
 	if apiUsable {
 		return tm.APITransport
 	}
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+	if tm.DNSTransport != nil && peer.DNSCarrierAddress() != nil {
 		return tm.DNSTransport
 	}
 
@@ -450,7 +450,7 @@ func reaches(t Transport, peer *Peer) bool {
 	case *APITransport:
 		return peer.APIUsable()
 	case *DNSTransport:
-		return peer.CurrentAddress() != nil
+		return peer.DNSCarrierAddress() != nil
 	}
 	return true
 }
