@@ -36,8 +36,7 @@ const (
 // installs as ChunkNotifyHandler.OnConfirmationReceived. HandleConfirmation
 // calls it with the parsed confirmation. It is an alias of the field's
 // function type, so a value stored through either name is the same type.
-type ConfirmationCallback = func(distributionID string, senderID string, status ConfirmStatus,
-	zone string, applied []string, removed []string, rejected []RejectedItemDTO, ignored []string, truncated bool, nonce string)
+type ConfirmationCallback = func(c *IncomingConfirmation)
 
 // GossipProvider returns the gossip the local node wants to piggyback on a
 // beat response to the named peer, or nil.

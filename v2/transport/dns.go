@@ -91,12 +91,15 @@ type operationResponse struct {
 	Gossip         json.RawMessage
 }
 
-// IncomingConfirmation represents a confirmation received via DNS
+// IncomingConfirmation is a confirmation received, over either mechanism.
+// HandleConfirmation gives it to the reliable queue and to the
+// application's OnConfirmationReceived.
 type IncomingConfirmation struct {
 	DistributionID string
 	PeerID         string
 	Status         ConfirmStatus
 	Message        string
+	App            json.RawMessage // The application's own data, as the confirmer sent it
 	Timestamp      time.Time
 	Zone           string
 	AppliedRecords []string
@@ -469,6 +472,7 @@ func buildConfirmPayload(req *ConfirmRequest) *DnsConfirmPayload {
 		Nonce:          req.Nonce,
 		Status:         req.Status.String(),
 		Message:        req.Message,
+		App:            req.App,
 		AppliedCount:   len(req.AppliedRecords),
 		RemovedCount:   len(req.RemovedRecords),
 		RejectedCount:  len(req.RejectedItems),
@@ -858,6 +862,7 @@ type DnsConfirmPayload struct {
 	Nonce          string            `json:"nonce,omitempty"` // Echoed nonce from the original sync request
 	Status         string            `json:"status"`
 	Message        string            `json:"message,omitempty"`
+	App            json.RawMessage   `json:"app,omitempty"` // The application's own data, carried as is
 	AppliedCount   int               `json:"applied_count,omitempty"`
 	RemovedCount   int               `json:"removed_count,omitempty"`
 	RejectedCount  int               `json:"rejected_count,omitempty"`

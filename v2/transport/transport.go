@@ -144,6 +144,7 @@ type ConfirmRequest struct {
 	Nonce          string            // Echoed nonce from the original sync request
 	Status         ConfirmStatus     // Result of processing
 	Message        string            // Optional details
+	App            json.RawMessage   // The application's own data, carried as is (omitted when empty)
 	AppliedRecords []string          // RRs accepted (additions)
 	RemovedRecords []string          // RRs confirmed removed (deletions)
 	RejectedItems  []RejectedItemDTO // RRs rejected with reasons

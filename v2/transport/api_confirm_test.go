@@ -38,6 +38,7 @@ func testConfirmRequest() *ConfirmRequest {
 		Nonce:          "n-1",
 		Status:         ConfirmPartial,
 		Message:        "one of two applied",
+		App:            json.RawMessage(testConfirmApp),
 		AppliedRecords: []string{"z.example.\t3600\tIN\tNS\tns1.b.example."},
 		RemovedRecords: []string{"z.example.\t3600\tIN\tNS\tns0.b.example."},
 		RejectedItems:  []RejectedItemDTO{{Record: "z.example.\t3600\tIN\tNS\tns2.b.example.", Reason: "not authorized"}},
