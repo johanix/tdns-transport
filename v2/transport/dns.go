@@ -234,7 +234,7 @@ func (t *DNSTransport) Hello(ctx context.Context, peer *Peer, req *HelloRequest)
 	}
 
 	// Create and send NOTIFY(CHUNK) - force endpoint for discovery (receiver may not know our address yet)
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "hello", distributionID, payloadJSON, true)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, addr, qname, "hello", distributionID, payloadJSON, true)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +286,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	// error, as a hello is and as the API transport reports a beat: the
 	// caller has to be able to tell a peer that refuses the beat from one
 	// that does not answer.
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", distributionID, payloadJSON, false)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, addr, qname, "beat", distributionID, payloadJSON, false)
 	if err != nil {
 		lgTransport().Warn("beat failed", "peer", peer.ID, "err", err)
 		return nil, err
@@ -541,9 +541,11 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	return nil
 }
 
-// sendNotifyWithPayload sends a NOTIFY(CHUNK) with payload and waits for confirmation.
-func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qname, opType, distributionID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
-	addr := peer.DNSCarrierAddress()
+// sendNotifyWithPayload sends a NOTIFY(CHUNK) with payload and waits for
+// confirmation. It dials addr, the address the caller read and checked: the
+// peer's may be gone by now (a DNS refusal in between), and is not read
+// again (#45).
+func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, addr *Address, qname, opType, distributionID string, payload []byte, forceEndpoint bool) (*operationResponse, error) {
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payload

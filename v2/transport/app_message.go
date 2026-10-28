@@ -133,13 +133,13 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	}
 	qname := t.buildNotifyQNAME(distributionID)
 	if msg.FireAndForget {
-		if err := t.sendNotifyUnconfirmed(ctx, peer, qname, msg.TypeToken, msg.Payload); err != nil {
+		if err := t.sendNotifyUnconfirmed(ctx, peer, addr, qname, msg.TypeToken, msg.Payload); err != nil {
 			return nil, err
 		}
 		return &AppResponse{ResponderID: peer.ID, Scope: msg.Scope, TypeToken: msg.TypeToken,
 			DistributionID: distributionID, Status: ConfirmSuccess, Timestamp: time.Now()}, nil
 	}
-	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, msg.TypeToken, distributionID, msg.Payload, false)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, addr, qname, msg.TypeToken, distributionID, msg.Payload, false)
 	if err != nil {
 		return nil, err
 	}
@@ -160,9 +160,10 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 
 // sendNotifyUnconfirmed is the fire-and-forget NOTIFY(CHUNK): the payload
 // rides inline in EDNS0, no pending distribution is registered and only
-// the DNS rcode is checked (the pre-C2 SendStatusUpdate contract).
-func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qname, opType string, payload []byte) error {
-	addr := peer.DNSCarrierAddress()
+// the DNS rcode is checked (the pre-C2 SendStatusUpdate contract). It
+// dials addr, the address the caller read and checked: the peer's may be
+// gone by now (a DNS refusal in between), and is not read again (#45).
+func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, addr *Address, qname, opType string, payload []byte) error {
 	finalPayload := payload
 	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
