@@ -63,7 +63,7 @@ func TestDNSPingToIPv6Peer(t *testing.T) {
 
 	sender := NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: zone, ChunkMode: "edns0", Timeout: 2 * time.Second})
 	peer := NewPeer("b.example.")
-	peer.SetDiscoveryAddress(&Address{Host: "::1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
+	setDNSCarrier(t, peer, &Address{Host: "::1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	resp, err := sender.Ping(ctx, peer, &PingRequest{SenderID: "a.example.", Nonce: "n-6", Timestamp: time.Now()})

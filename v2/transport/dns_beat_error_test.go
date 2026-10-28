@@ -31,7 +31,7 @@ func dnsPeerAnswering(t *testing.T, rcode int) *Peer {
 		_ = srv.ShutdownContext(ctx)
 	})
 	peer := NewPeer("b.example.")
-	peer.SetDiscoveryAddress(&Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
+	setDNSCarrier(t, peer, &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
 	return peer
 }
 
@@ -82,7 +82,7 @@ func TestADNSBeatThatGetsNoAnswerIsAnError(t *testing.T) {
 	_ = ln.Close() // nothing listens there now
 
 	peer := NewPeer("b.example.")
-	peer.SetDiscoveryAddress(&Address{Host: "127.0.0.1", Port: port, Transport: "tcp"})
+	setDNSCarrier(t, peer, &Address{Host: "127.0.0.1", Port: port, Transport: "tcp"})
 	sender := NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", ChunkMode: "edns0", Timeout: time.Second})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

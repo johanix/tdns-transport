@@ -37,7 +37,7 @@ func TestRegisterDiscoveredPeer_apiOnlyNeedsNoDNSKey(t *testing.T) {
 
 // A DNS result populates the DNS mechanism's address slot, so HasMechanism
 // and PreferredMechanism see it; with both mechanisms resolved the API
-// preference is kept and the DNS carrier's address is what CurrentAddress
+// preference is kept and the DNS carrier's address is what DNSCarrierAddress
 // returns.
 func TestRegisterDiscoveredPeer_dnsAddressAndPreference(t *testing.T) {
 	tm := &TransportManager{PeerRegistry: NewPeerRegistry()}
@@ -52,8 +52,8 @@ func TestRegisterDiscoveredPeer_dnsAddressAndPreference(t *testing.T) {
 	if !peer.HasMechanism("DNS") || peer.PreferredMechanism() != "DNS" || peer.PreferredTransport != "DNS" {
 		t.Fatalf("DNS mechanism not usable: has=%v pref=%q transport=%q", peer.HasMechanism("DNS"), peer.PreferredMechanism(), peer.PreferredTransport)
 	}
-	if a := peer.CurrentAddress(); a == nil || a.Host != "192.0.2.2" || a.Port != 8154 {
-		t.Fatalf("CurrentAddress = %+v, want 192.0.2.2:8154", a)
+	if a := peer.DNSCarrierAddress(); a == nil || a.Host != "192.0.2.2" || a.Port != 8154 {
+		t.Fatalf("DNSCarrierAddress = %+v, want 192.0.2.2:8154", a)
 	}
 
 	if err := tm.RegisterDiscoveredPeer(&DiscoveryResult{
@@ -72,8 +72,8 @@ func TestRegisterDiscoveredPeer_dnsAddressAndPreference(t *testing.T) {
 	if peer.PreferredTransport != "API" || peer.PreferredMechanism() != "API" {
 		t.Fatalf("API should stay preferred: transport=%q mechanism=%q", peer.PreferredTransport, peer.PreferredMechanism())
 	}
-	if a := peer.CurrentAddress(); a == nil || a.Host != "192.0.2.4" {
-		t.Fatalf("CurrentAddress (the DNS carrier slot) = %+v, want the DNS address", a)
+	if a := peer.DNSCarrierAddress(); a == nil || a.Host != "192.0.2.4" {
+		t.Fatalf("DNSCarrierAddress (the DNS carrier slot) = %+v, want the DNS address", a)
 	}
 }
 

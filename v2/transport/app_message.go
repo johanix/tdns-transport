@@ -123,7 +123,7 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	if msg == nil || msg.TypeToken == "" {
 		return nil, NewTransportError("DNS", "SendApp", peer.ID, fmt.Errorf("empty application message"), false)
 	}
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	if addr == nil {
 		return nil, NewTransportError("DNS", msg.TypeToken, peer.ID, fmt.Errorf("no address available"), false)
 	}
@@ -162,7 +162,7 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 // rides inline in EDNS0, no pending distribution is registered and only
 // the DNS rcode is checked (the pre-C2 SendStatusUpdate contract).
 func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, qname, opType string, payload []byte) error {
-	addr := peer.CurrentAddress()
+	addr := peer.DNSCarrierAddress()
 	finalPayload := payload
 	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {

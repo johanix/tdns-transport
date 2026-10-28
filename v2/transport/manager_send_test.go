@@ -148,7 +148,7 @@ func TestSendVerbNotAcceptedFallsBack(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(rcv.srv)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
 	posts, notifies := 0, 0
@@ -277,7 +277,7 @@ func TestSendDNSOnlyVerbHasNoAPIFallback(t *testing.T) {
 	peer.APIEndpoint = fmt.Sprintf("https://127.0.0.1:%d", port)
 	withTLSA(peer, otherCert(t)) // nothing is ever presented to check it against
 	addr := &Address{Host: "127.0.0.1", Port: uint16(port), Transport: "tcp"}
-	peer.SetDiscoveryAddress(addr)
+	setDNSCarrier(t, peer, addr)
 	peer.SetMechanismAddress("DNS", addr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

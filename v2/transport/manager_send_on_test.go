@@ -24,7 +24,7 @@ func sendOnRig(t *testing.T) (*TransportManager, *msgReceiver, *dnsChunkReceiver
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(rcv.srv)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 	return tm, rcv, dnsRcv, peer
 }
@@ -167,7 +167,7 @@ func TestSendOnRefusalOnTheFallback(t *testing.T) {
 	}
 	dead := &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	ln.Close() // nothing listens there: every NOTIFY is refused
-	peer.SetDiscoveryAddress(dead)
+	setDNSCarrier(t, peer, dead)
 	peer.SetMechanismAddress("DNS", dead)
 	rcv.refuseWith("not authorized")
 
@@ -232,7 +232,7 @@ func TestSendOnNoFallbackThatDoesNotReach(t *testing.T) {
 	}
 	dead := &Address{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), Transport: "tcp"}
 	ln.Close() // nothing listens there: every NOTIFY is refused
-	peer.SetDiscoveryAddress(dead)
+	setDNSCarrier(t, peer, dead)
 	peer.SetMechanismAddress("DNS", dead)
 	peer.SetMechanismTLSA("API", TLSASet{})
 
@@ -265,7 +265,7 @@ func TestSendOnHangingFirstChoiceLeavesTheOtherTime(t *testing.T) {
 		DNSTransport: NewDNSTransport(&DNSTransportConfig{LocalID: "a.example.", ControlZone: "control.example.", Timeout: 2 * time.Second}),
 	}
 	peer := apiPeer(hanging)
-	peer.SetDiscoveryAddress(dnsRcv.addr)
+	setDNSCarrier(t, peer, dnsRcv.addr)
 	peer.SetMechanismAddress("DNS", dnsRcv.addr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
