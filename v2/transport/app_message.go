@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -133,7 +132,7 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 	}
 	qname := t.buildNotifyQNAME(distributionID)
 	if msg.FireAndForget {
-		if err := t.sendNotifyUnconfirmed(ctx, peer, addr, qname, msg.TypeToken, msg.Payload); err != nil {
+		if err := t.sendNotifyUnconfirmed(ctx, peer, addr, qname, distributionID, msg.TypeToken, msg.Payload); err != nil {
 			return nil, err
 		}
 		return &AppResponse{ResponderID: peer.ID, Scope: msg.Scope, TypeToken: msg.TypeToken,
@@ -159,11 +158,12 @@ func (t *DNSTransport) SendApp(ctx context.Context, peer *Peer, msg *AppMessage)
 }
 
 // sendNotifyUnconfirmed is the fire-and-forget NOTIFY(CHUNK): the payload
-// rides inline in EDNS0, no pending distribution is registered and only
-// the DNS rcode is checked (the pre-C2 SendStatusUpdate contract). It
-// dials addr, the address the caller read and checked: the peer's may be
-// gone by now (a DNS refusal in between), and is not read again (#45).
-func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, addr *Address, qname, opType string, payload []byte) error {
+// rides inline in EDNS0 (by query when it does not fit one DNS message), no
+// pending distribution is registered and only the DNS rcode is checked (the
+// pre-C2 SendStatusUpdate contract). It dials addr, the address the caller
+// read and checked: the peer's may be gone by now (a DNS refusal in
+// between), and is not read again (#45).
+func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, addr *Address, qname, distributionID, opType string, payload []byte) error {
 	finalPayload := payload
 	var payloadFormat uint8 = EnvelopeNone
 	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
@@ -180,9 +180,8 @@ func (t *DNSTransport) sendNotifyUnconfirmed(ctx context.Context, peer *Peer, ad
 	m.Question = []dns.Question{
 		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
-	m.SetEdns0(4096, true)
-	if opt := m.IsEdns0(); opt != nil {
-		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
+	if err := t.placeChunkPayload(m, peer.ID, opType, distributionID, payloadFormat, finalPayload, true, false); err != nil {
+		return NewTransportError("DNS", opType, peer.ID, err, false)
 	}
 	dnsAddr := addr.HostPort()
 	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)

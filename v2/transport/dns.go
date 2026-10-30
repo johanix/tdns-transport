@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/distrib"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -57,8 +56,14 @@ type DNSTransport struct {
 	// chunkMode: "edns0" or "query"; when "query", the payload's CHUNK
 	// records are kept in chunkStore and the NOTIFY is sent without an
 	// EDNS0 payload; the receiver fetches them (ServeChunkQueries answers).
+	// In "edns0" mode a payload that does not fit one DNS message is sent
+	// that way too (chunk_inline.go), so the store is there in both modes.
 	chunkMode  string
 	chunkStore ChunkStore
+	// serveChunks registers the CHUNK query handler once: at the start in
+	// query mode, at the first payload sent by query in edns0 mode.
+	serveChunks    sync.Once
+	serveChunksErr error
 	// chunkQueryEndpoint: for query mode, address (host:port) where we answer CHUNK queries
 	chunkQueryEndpoint string
 	// chunkQueryEndpointInNotify: when true, include endpoint in NOTIFY (EDNS0); when false, receiver uses static config
@@ -167,15 +172,17 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		t.SecureWrapper = NewSecurePayloadWrapper(cfg.PayloadCrypto)
 	}
 
-	// Query mode keeps the records it will serve
-	if t.chunkMode == "query" && t.chunkStore == nil {
+	// Query mode keeps the records it will serve; edns0 mode keeps those of
+	// a payload too large for one DNS message.
+	if t.chunkStore == nil {
 		t.chunkStore = newMemChunkStore(5 * time.Minute)
 	}
 
 	return t
 }
 
-// ChunkStore returns the store of query-mode records; nil in edns0 mode.
+// ChunkStore returns the store of the records sent by query: every payload
+// in query mode, and in edns0 mode those too large for one DNS message.
 func (t *DNSTransport) ChunkStore() ChunkStore {
 	return t.chunkStore
 }
@@ -343,40 +350,13 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 		t.distributionAdd(qname, t.LocalID, peer.ID, "ping", distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
-	if useQueryMode {
-		// Prepare manifest + data chunks; the manifest names the payload's envelope
-		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
-		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, "ping", distributionID, peer.ID, nil, t.chunkMaxSize,
-			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
-		if err != nil {
-			return nil, NewTransportError("DNS", "Ping", peer.ID,
-				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
-		}
-		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
-	}
-
 	m := new(dns.Msg)
 	m.SetNotify(qname)
 	m.Question = []dns.Question{
 		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
-	if !useQueryMode {
-		m.SetEdns0(4096, true)
-		opt := m.IsEdns0()
-		if opt != nil {
-			opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
-		}
-	} else if t.chunkQueryEndpoint != "" && t.chunkQueryEndpointInNotify {
-		m.SetEdns0(4096, true)
-		opt := m.IsEdns0()
-		if opt != nil {
-			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-				Code: edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
-				Data: []byte(t.chunkQueryEndpoint),
-			})
-		}
+	if err := t.placeChunkPayload(m, peer.ID, "ping", distributionID, payloadFormat, finalPayload, t.chunkMode != "query", false); err != nil {
+		return nil, NewTransportError("DNS", "Ping", peer.ID, err, false)
 	}
 
 	dnsAddr := addr.HostPort()
@@ -503,8 +483,9 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
 	}
 
-	// No size guard needed: we use TCP and CHUNK fragmentation handles
-	// arbitrary payload sizes. Never silently drop per-RR detail.
+	// No size guard, and per-RR detail is never dropped: the confirmation
+	// rides inline in its NOTIFY, and one too large for one DNS message is
+	// sent by query instead (placeChunkPayload).
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON
@@ -526,11 +507,8 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
 
-	// Add payload as CHUNK EDNS0 option
-	m.SetEdns0(4096, true)
-	opt := m.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
+	if err := t.placeChunkPayload(m, peer.ID, "confirm", req.DistributionID, payloadFormat, finalPayload, true, false); err != nil {
+		return NewTransportError("DNS", "Confirm", peer.ID, err, false)
 	}
 
 	// Send NOTIFY to peer
@@ -568,20 +546,6 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, ad
 		t.distributionAdd(qname, t.LocalID, peer.ID, opType, distributionID, len(finalPayload))
 	}
 
-	useQueryMode := t.chunkMode == "query" && t.chunkStore != nil
-	if useQueryMode {
-		// Prepare manifest + data chunks; the manifest names the payload's envelope
-		chunkQueryQname := buildChunkQueryQname(peer.ID, distributionID, t.ControlZone)
-		allChunks, err := distrib.PrepareDistributionChunks(
-			finalPayload, opType, distributionID, peer.ID, nil, t.chunkMaxSize,
-			map[string]interface{}{manifestEnvelopeKey: payloadFormat})
-		if err != nil {
-			return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID,
-				fmt.Errorf("failed to prepare distribution chunks: %w", err), false)
-		}
-		t.chunkStore.SetChunks(chunkQueryQname, allChunks)
-	}
-
 	// Create NOTIFY message
 	m := new(dns.Msg)
 	m.SetNotify(qname)
@@ -589,23 +553,11 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, ad
 		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
 
-	// EDNS0: payload in edns0 mode; in query mode include CHUNK query endpoint so receiver knows where to send CHUNK query
-	if !useQueryMode {
-		m.SetEdns0(4096, true)
-		opt := m.IsEdns0()
-		if opt != nil {
-			opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
-		}
-	} else if t.chunkQueryEndpoint != "" && (t.chunkQueryEndpointInNotify || forceEndpoint) {
-		// Include endpoint if configured OR if forced (discovery messages need it)
-		m.SetEdns0(4096, true)
-		opt := m.IsEdns0()
-		if opt != nil {
-			opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
-				Code: edns0.EDNS0_CHUNK_QUERY_ENDPOINT_CODE,
-				Data: []byte(t.chunkQueryEndpoint),
-			})
-		}
+	// The payload inline in edns0 mode, by query in query mode; the query
+	// endpoint is included if configured to, or if forced (discovery
+	// messages need it).
+	if err := t.placeChunkPayload(m, peer.ID, opType, distributionID, payloadFormat, finalPayload, t.chunkMode != "query", forceEndpoint); err != nil {
+		return nil, NewTransportError("DNS", "sendNotifyWithPayload", peer.ID, err, false)
 	}
 
 	// Clean up stale pending entries before registering new one

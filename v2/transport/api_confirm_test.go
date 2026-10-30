@@ -153,7 +153,11 @@ func newDNSChunkReceiver(t *testing.T) *dnsChunkReceiver {
 		if confirm {
 			m.SetEdns0(dns.DefaultMsgSize, false)
 			opt := m.IsEdns0()
-			opt.Option = append(opt.Option, edns0.CreateChunkOption(EnvelopeNone, nil, []byte(`{"type":"confirm","status":"ok","message":"received"}`)))
+			chunk, err := edns0.CreateChunkOption(EnvelopeNone, nil, []byte(`{"type":"confirm","status":"ok","message":"received"}`))
+			if err != nil {
+				t.Errorf("the confirmation's CHUNK option: %v", err)
+			}
+			opt.Option = append(opt.Option, chunk)
 		}
 		_ = w.WriteMsg(m)
 	})}
