@@ -22,17 +22,23 @@ import (
 )
 
 // ServeChunkQueries registers, with tdns's query dispatcher, a handler that
-// answers CHUNK queries for the distributions this transport has stored.
-// Call it once, on a transport in query mode; it is what makes a node a
-// query-mode sender.
+// answers CHUNK queries for the distributions this transport has stored. It
+// is what makes a node a query-mode sender: call it at the start on a
+// transport in query mode. A transport in edns0 mode calls it itself, the
+// first time it sends a payload by query. It registers once; a later call
+// returns the first one's result.
 func (t *DNSTransport) ServeChunkQueries() error {
-	if t.chunkStore == nil {
-		return fmt.Errorf("ServeChunkQueries: the transport is not in query mode (no chunk store)")
-	}
-	store := t.chunkStore
-	return tdns.RegisterQueryHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsQueryRequest) error {
-		return serveChunkQuery(req, store)
+	t.serveChunks.Do(func() {
+		if t.chunkStore == nil {
+			t.serveChunksErr = fmt.Errorf("ServeChunkQueries: the transport has no chunk store")
+			return
+		}
+		store := t.chunkStore
+		t.serveChunksErr = tdns.RegisterQueryHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsQueryRequest) error {
+			return serveChunkQuery(req, store)
+		})
 	})
+	return t.serveChunksErr
 }
 
 // serveChunkQuery answers one CHUNK query from the store. The first label

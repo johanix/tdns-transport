@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -270,8 +269,14 @@ func sendChunkResponse(w dns.ResponseWriter, req *dns.Msg, payload []byte, forma
 	opt.Hdr.Rrtype = dns.TypeOPT
 	opt.SetUDPSize(4096)
 
-	opt.Option = append(opt.Option, edns0.CreateChunkOption(format, nil, payload))
 	resp.Extra = append(resp.Extra, opt)
+	// A reply cannot be fetched by query: one that does not fit one DNS
+	// message is refused rather than sent cut.
+	if fits, err := attachChunkPayload(resp, format, payload); err != nil || !fits {
+		lgTransport().Error("the reply does not fit one DNS message; answering SERVFAIL",
+			"bytes", len(payload), "err", err)
+		return sendStandardResponse(w, req, dns.RcodeServerFailure)
+	}
 
 	return w.WriteMsg(resp)
 }

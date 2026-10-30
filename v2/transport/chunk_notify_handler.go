@@ -303,9 +303,12 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 	resp.Authoritative = true
 	resp.Rcode = dns.RcodeSuccess
 	resp.SetEdns0(4096, true)
-	opt := resp.IsEdns0()
-	if opt != nil {
-		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, payloadBytes))
+	// A reply cannot be fetched by query: one that does not fit one DNS
+	// message is refused rather than sent cut.
+	if fits, err := attachChunkPayload(resp, payloadFormat, payloadBytes); err != nil || !fits {
+		lgTransport().Error("the confirmation does not fit one DNS message; answering SERVFAIL",
+			"peer", senderID, "bytes", len(payloadBytes), "err", err)
+		return h.sendResponse(w, req, dns.RcodeServerFailure)
 	}
 	return w.WriteMsg(resp)
 }

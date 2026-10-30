@@ -31,7 +31,8 @@ func TestADNSSendDialsTheAddressItChecked(t *testing.T) {
 	if _, err := dt.sendNotifyWithPayload(ctx, peer, rcv.addr, dt.buildNotifyQNAME(id), "beat", id, []byte(`{"MessageType":"beat"}`), false); err != nil {
 		t.Errorf("sendNotifyWithPayload: %v", err)
 	}
-	if err := dt.sendNotifyUnconfirmed(ctx, peer, rcv.addr, dt.buildNotifyQNAME(GenerateDistributionID()), "status", []byte(`{"type":"status"}`)); err != nil {
+	sid := GenerateDistributionID()
+	if err := dt.sendNotifyUnconfirmed(ctx, peer, rcv.addr, dt.buildNotifyQNAME(sid), sid, "status", []byte(`{"type":"status"}`)); err != nil {
 		t.Errorf("sendNotifyUnconfirmed: %v", err)
 	}
 	if got := len(rcv.received()); got != 2 {

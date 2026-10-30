@@ -357,7 +357,12 @@ func testReceivePipeline() bool {
 	notify.SetNotify(qname)
 	notify.Question = []dns.Question{{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET}}
 	notify.SetEdns0(4096, true)
-	notify.IsEdns0().Option = append(notify.IsEdns0().Option, edns0.CreateChunkOption(core.FormatJSON, nil, payload))
+	chunk, err := edns0.CreateChunkOption(core.FormatJSON, nil, payload)
+	if err != nil {
+		fmt.Printf("  FAIL: CHUNK option: %v\n", err)
+		return false
+	}
+	notify.IsEdns0().Option = append(notify.IsEdns0().Option, chunk)
 
 	w := &captureWriter{}
 	if err := tm.ChunkHandler.RouteViaRouter(context.Background(), qname, notify, w); err != nil {
