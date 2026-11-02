@@ -361,8 +361,8 @@ type SendOutcome struct {
 //
 // A failure to deliver on the first choice is counted against that
 // mechanism (RecordMechanismFailure), so a pair that works one way only
-// shows in the gossip matrix (tdns-mp #236). The mechanism that carries req,
-// the first or the other, has its count cleared (RecordMechanismSuccess). A
+// shows in that mechanism's reading (tdns-mp #236). The mechanism that carries
+// req, the first or the other, has its count cleared (RecordMechanismSuccess). A
 // judged refusal and a verb the mechanism does not carry are answers, not
 // failures to deliver, and are not counted. The outcome says which mechanism
 // carried req, and why the first did not.

@@ -270,6 +270,11 @@ func (p *Peer) PreferredMechanism() string {
 // "I can reach this peer" with the beat data that proves it — promotion
 // is stamped on a successful outbound beat, demotion falls out of the
 // aging of that same timestamp. No external decay loop is needed.
+//
+// Only beats move it. A send that failed on a mechanism shows in that
+// mechanism's own reading (MechanismEffectiveState), not here: the callers
+// read this as whether the peer is alive, and a group's leader goes with it
+// (tdns-mp #337).
 func (p *Peer) EffectiveState() PeerState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -326,21 +331,13 @@ func (p *Peer) decayedMechanismState(m *MechanismState) PeerState {
 	// operational without beat evidence decays out.
 	sinceS := timeSinceOrInf(m.LastBeatSent)
 
-	st := PeerStateOperational
 	if sinceS > 10*localInterval {
-		st = PeerStateInterrupted
-	} else if sinceS > 2*localInterval {
-		st = PeerStateDegraded
+		return PeerStateInterrupted
 	}
-	// A failed outbound send on this mechanism (RecordMechanismFailure)
-	// makes the cell at least DEGRADED even when beats still succeed:
-	// a confirmation that always falls back is a one-way pair the
-	// gossip matrix must show (tdns-mp #236). Interrupted from silence
-	// stays Interrupted.
-	if m.ConsecutiveFails > 0 && st == PeerStateOperational {
+	if sinceS > 2*localInterval {
 		return PeerStateDegraded
 	}
-	return st
+	return PeerStateOperational
 }
 
 func timeSinceOrInf(t time.Time) time.Duration {
@@ -672,7 +669,15 @@ func (p *Peer) MechanismEffectiveState(name string) (PeerState, bool) {
 	if !ok || m == nil {
 		return PeerState(0), false
 	}
-	return p.decayedMechanismState(m), true
+	st := p.decayedMechanismState(m)
+	// A failed outbound send on this mechanism (RecordMechanismFailure)
+	// makes it at least DEGRADED even when beats still succeed: a
+	// confirmation that always falls back is a one-way pair (tdns-mp
+	// #236). Interrupted from silence stays Interrupted.
+	if m.ConsecutiveFails > 0 && st == PeerStateOperational {
+		return PeerStateDegraded, true
+	}
+	return st, true
 }
 
 // SetState updates the peer's state with a reason.
@@ -988,8 +993,9 @@ func (p *Peer) recordFailure() {
 // RecordMechanismFailure counts a failed outbound send on the named
 // mechanism. ConsecutiveFails rises; MechanismEffectiveState then reads
 // at least DEGRADED while fails remain, so a one-way pair shows in the
-// gossip matrix. A recipient's Answered refusal is not a send failure
-// (tdns-mp #236, tdns-transport #36).
+// per-mechanism reading. EffectiveState does not read the count (tdns-mp
+// #337). A recipient's Answered refusal is not a send failure (tdns-mp
+// #236, tdns-transport #36).
 func (p *Peer) RecordMechanismFailure(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
