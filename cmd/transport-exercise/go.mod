@@ -4,13 +4,13 @@ go 1.25.2
 
 replace (
 	github.com/johanix/tdns-transport/v2 => ../../v2
-	github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+	github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.5
 )
 
 require (
 	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2/core v0.0.0-20261030100009-0e47371c2209
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261030100009-0e47371c2209
+	github.com/johanix/tdns/v2/core v0.0.0-20261111214946-0eb61a93d889
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261111214946-0eb61a93d889
 	github.com/miekg/dns v1.1.70
 )
 
@@ -27,8 +27,8 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
-	github.com/johanix/tdns/v2 v2.0.0-20261030100009-0e47371c2209 // indirect
-	github.com/johanix/tdns/v2/cache v0.0.0-20261030100009-0e47371c2209 // indirect
+	github.com/johanix/tdns/v2 v2.0.0-20261111214946-0eb61a93d889 // indirect
+	github.com/johanix/tdns/v2/cache v0.0.0-20261111214946-0eb61a93d889 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.52 // indirect
