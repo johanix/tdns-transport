@@ -2,15 +2,15 @@ module github.com/johanix/tdns-transport/v2
 
 go 1.25.2
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.5
 
 require (
 	github.com/cloudflare/circl v1.6.3
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/johanix/tdns/v2 v2.0.0-20261030100009-0e47371c2209
-	github.com/johanix/tdns/v2/cache v0.0.0-20261030100009-0e47371c2209
-	github.com/johanix/tdns/v2/core v0.0.0-20261030100009-0e47371c2209
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261030100009-0e47371c2209
+	github.com/johanix/tdns/v2 v2.0.0-20261112064540-b6789c8ed3d4
+	github.com/johanix/tdns/v2/cache v0.0.0-20261112064540-b6789c8ed3d4
+	github.com/johanix/tdns/v2/core v0.0.0-20261112064540-b6789c8ed3d4
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261112064540-b6789c8ed3d4
 	github.com/miekg/dns v1.1.70
 )
 
